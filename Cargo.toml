@@ -1,0 +1,27 @@
+[package]
+name = "installer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Installs a bootc image onto a disk from the media that carries it"
+
+[[bin]]
+name = "bootc-anywhere"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+common = { git = "https://github.com/buildc-org/common", rev = "53ec29e2b4ec4b939116d654c7ed8254c0c3093b" }
+
+[profile.release]
+opt-level = 1
+debug = false
+lto = false
+codegen-units = 16
+strip = true
+
+[profile.dist]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1

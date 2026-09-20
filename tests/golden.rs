@@ -1,0 +1,457 @@
+use std::path::{Path, PathBuf};
+
+fn crate_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn tmp() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+}
+
+fn empty(name: &str) -> PathBuf {
+    let dir = tmp().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn compare(name: &str, file: &str, actual: &str) {
+    let actual = actual.replace(env!("CARGO_PKG_VERSION"), "{version}");
+    let path = crate_dir().join("tests/golden").join(name).join(file);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("{}: {err}\nrun UPDATE_GOLDEN=1 cargo test", path.display()));
+    assert!(
+        expected == actual,
+        "{} changed. Rerun with UPDATE_GOLDEN=1 and read the diff.\n{}",
+        path.display(),
+        first_difference(&expected, &actual)
+    );
+}
+
+fn first_difference(expected: &str, actual: &str) -> String {
+    let at = expected
+        .bytes()
+        .zip(actual.bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or(expected.len().min(actual.len()));
+    let window = |s: &str| {
+        let from = at.saturating_sub(60);
+        let to = (at + 60).min(s.len());
+        s.get(from..to)
+            .unwrap_or("<not a char boundary>")
+            .escape_debug()
+            .to_string()
+    };
+    format!(
+        "first difference at byte {at} of {} expected, {} actual\n  expected: {}\n    actual: {}",
+        expected.len(),
+        actual.len(),
+        window(expected),
+        window(actual)
+    )
+}
+
+fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]]) {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let mut child = std::process::Command::new("script")
+        .args(["-qfec", command, "/dev/null"])
+        .current_dir(dir)
+        .env("COLUMNS", "80")
+        .env("BUILDC_TPM", "/nonexistent")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("script from util-linux");
+    let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+    let mut output = child.stdout.take().unwrap();
+    let raw = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (input, raw) = (input.clone(), raw.clone());
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            while output.read_exact(&mut byte).is_ok() {
+                let mut held = raw.lock().unwrap();
+                held.push(byte[0]);
+                if held.ends_with(b"\x1b[6n") {
+                    let mut input = input.lock().unwrap();
+                    let _ = input.write_all(b"\x1b[1;1R");
+                    let _ = input.flush();
+                }
+            }
+        })
+    };
+    for keys in steps {
+        std::thread::sleep(Duration::from_millis(400));
+        let mut input = input.lock().unwrap();
+        input.write_all(keys).unwrap();
+        input.flush().unwrap();
+    }
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    let mut errors = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut errors)
+        .unwrap();
+    let raw = raw.lock().unwrap();
+    assert!(
+        status.success(),
+        "{errors}{}",
+        String::from_utf8_lossy(&raw)
+    );
+
+    let text = String::from_utf8_lossy(&raw);
+    let stable = text.rsplit_once(after).unwrap().1;
+    compare(
+        name,
+        "transcript.txt",
+        &format!("{after}{stable}==== exit 0\n"),
+    );
+}
+
+#[test]
+fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
+    use std::time::Duration;
+
+    let dir = empty("flow-install-lock");
+    std::fs::write(
+        dir.join(installer::RECIPE),
+        r#"{
+  "image": "ghcr.io/buildc-org/deb2:latest",
+  "targetImgref": "ghcr.io/buildc-org/deb2:latest",
+  "composeFsBackend": true,
+  "genericImage": true,
+  "bootloader": "grub2",
+  "filesystem": "ext4",
+  "luksInitramfs": true,
+  "hostname": "deb2",
+  "user": { "groups": ["sudo"] }
+}
+"#,
+    )
+    .unwrap();
+    let lock = dir.join("installer.lock");
+    let second = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_bootc-anywhere"))
+            .args(["--from", "."])
+            .current_dir(&dir)
+            .env("BUILDC_INSTALLER_LOCK", &lock)
+            .env("BUILDC_TPM", "/nonexistent")
+            .output()
+            .unwrap()
+    };
+
+    let mut first = std::process::Command::new("script")
+        .args([
+            "-qfec",
+            &format!(
+                "BUILDC_INSTALLER_LOCK='{}' '{}' --from .",
+                lock.display(),
+                env!("CARGO_BIN_EXE_bootc-anywhere")
+            ),
+            "/dev/null",
+        ])
+        .current_dir(&dir)
+        .env("COLUMNS", "80")
+        .env("BUILDC_TPM", "/nonexistent")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("script from util-linux");
+
+    let mut refused = None;
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(50));
+        let out = second();
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        if said.contains("the installer is running on") {
+            refused = Some(said);
+            break;
+        }
+    }
+    let killed = first.kill().and_then(|()| first.wait());
+    let refused = refused.expect("the first installer never held the lock while it ran");
+    killed.expect("the first installer is reaped");
+
+    assert!(
+        refused.contains(&format!("run `{}` again", installer::PROGRAM)),
+        "{refused}"
+    );
+    let after = second();
+    assert!(
+        !String::from_utf8_lossy(&after.stderr).contains("the installer is running on"),
+        "the lock outlived the process holding it: {}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+}
+
+#[test]
+fn install_screens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = empty("flow-install-drawn");
+    std::fs::write(
+        dir.join(installer::RECIPE),
+        r#"{
+  "image": "ghcr.io/buildc-org/deb2:latest",
+  "targetImgref": "ghcr.io/buildc-org/deb2:latest",
+  "composeFsBackend": true,
+  "genericImage": true,
+  "bootloader": "grub2",
+  "filesystem": "ext4",
+  "luksInitramfs": true,
+  "hostname": "deb2",
+  "user": { "groups": ["sudo"] }
+}
+"#,
+    )
+    .unwrap();
+    let sys = dir.join("sys-block");
+    for (name, size, removable, model) in [
+        ("vda", "134217728", "0", "QEMU HARDDISK"),
+        ("sdb", "31457280", "1", "Cruzer Blade"),
+    ] {
+        let disk = sys.join(name);
+        std::fs::create_dir_all(disk.join("device")).unwrap();
+        std::fs::write(disk.join("size"), size).unwrap();
+        std::fs::write(disk.join("removable"), removable).unwrap();
+        std::fs::write(disk.join("device/model"), model).unwrap();
+    }
+    let lsblk = dir.join("lsblk");
+    std::fs::write(
+        &lsblk,
+        r#"#!/bin/sh
+case "$*" in
+*--json*"/dev/sdb"*) printf '%s\n' '{"blockdevices":[{"name":"/dev/sdb","type":"disk","children":[]}]}' ;;
+*--json*) printf '%s\n' '{"blockdevices":[{"name":"/dev/vda","type":"disk","children":[{"name":"/dev/vda1","size":"512M","fstype":"vfat","label":"EFI","type":"part","parttype":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"},{"name":"/dev/vda2","size":"63.5G","fstype":"ext4","label":"old-root","type":"part","parttype":null},{"name":"/dev/vda3","size":"60G","fstype":"crypto_LUKS","label":"","type":"part","parttype":null}]}]}' ;;
+*SIZE*) printf '%s\n' '64G' ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&lsblk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sfdisk = dir.join("sfdisk");
+    std::fs::write(
+        &sfdisk,
+        r#"#!/bin/sh
+case "$1" in
+--dump) cat <<'EOF'
+label: gpt
+unit: sectors
+first-lba: 2048
+last-lba: 134217694
+sector-size: 512
+
+/dev/vda1 : start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+/dev/vda2 : start=1050624, size=133169152, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+/dev/vda3 : start=134219776, size=125829120, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+EOF
+;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&sfdisk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for name in ["mount", "umount"] {
+        let fake = dir.join(name);
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cryptsetup = dir.join("cryptsetup");
+    std::fs::write(
+        &cryptsetup,
+        r#"#!/bin/sh
+case "$1" in
+luksDump) printf '%s\n' '{"keyslots":{"0":{}},"tokens":{}}' ;;
+*) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cryptsetup, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let efivars = dir.join("efivars");
+    std::fs::create_dir_all(&efivars).unwrap();
+    for (name, value) in [("SecureBoot", 0u8), ("SetupMode", 1u8)] {
+        let mut bytes = vec![0, 0, 0, 7];
+        bytes.push(value);
+        std::fs::write(
+            efivars.join(format!("{name}-8be4df61-93ca-11d2-aa0d-00e098032b8c")),
+            bytes,
+        )
+        .unwrap();
+    }
+    let active = dir.join("tty0-active");
+    std::fs::write(&active, "tty2\n").unwrap();
+    drawn_flow(
+        "flow-install-drawn",
+        &dir,
+        &format!(
+            "stty rows 50 cols 80; PATH='{}':\"$PATH\" BUILDC_INSTALLER_LOCK='{}' BUILDC_SYS_BLOCK='{}' BUILDC_MOUNT_ROOT='{}' BUILDC_EFIVARS='{}' BUILDC_TTY0_ACTIVE='{}' '{}' --from .",
+            dir.display(),
+            dir.join("installer.lock").display(),
+            sys.display(),
+            dir.join("mounts").display(),
+            efivars.display(),
+            active.display(),
+            env!("CARGO_BIN_EXE_bootc-anywhere")
+        ),
+        &format!("{}: ghcr.io/buildc-org/deb2:latest, from .\r\n", installer::PROGRAM),
+        &[
+            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
+            b"\x1b[B",
+            b"\r",
+            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
+            b"\x1b[A",
+            b"\x1b[B", 
+            b"tect\r",
+            b"hunter2\r",
+            b"hunter2\r",
+            b"\r", 
+            b"\r", 
+            b"\x1b[B",
+            b"\x1b[B",
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"", 
+            b"\r", 
+            b"", 
+            b"\x1b[A", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[B", 
+            b"20\r", 
+            b"\x1b[B", 
+            b"\x1b[B", 
+            b"\x1b[A", 
+            b"\x1b[A", 
+            b"\x1b[A", 
+            b"\x1b[A", 
+            b"\r", 
+            b"\r", 
+            b"", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"opensesame\r", 
+            b"opensesamex\r", 
+            b"\x7f", 
+            b"\r", 
+            b"", 
+            b"\x1b[A", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\x1b[C", 
+            b"\r", 
+            b"\x1b", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[C",
+            b"\r", 
+            b"\x1b", 
+            b"\x1b[B",
+            b"\x1b[B",
+            b"\r", 
+        ],
+    );
+    let transcript =
+        std::fs::read_to_string(crate_dir().join("tests/golden/flow-install-drawn/transcript.txt"))
+            .unwrap();
+    assert!(!transcript.contains("hunter2"), "{transcript}");
+    for phrase in [
+        "OS Image",
+        "Detected System Firmware",
+        "bootloader",
+        installer::copy::FIRMWARE_SETUP,
+    ] {
+        assert!(transcript.contains(phrase), "{phrase} is not on the screen");
+    }
+    assert!(
+        transcript.contains("Missing: installation disk, username, password"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains(installer::copy::INSTALLATION_SUMMARY),
+        "{transcript}"
+    );
+    assert!(transcript.contains(installer::copy::READY), "{transcript}");
+    assert!(
+        transcript.contains(installer::copy::START_INSTALLATION),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains(installer::copy::EXIT_SHELL),
+        "{transcript}"
+    );
+    assert!(transcript.contains("Ctrl+Alt"), "{transcript}");
+    assert!(
+        transcript.contains(installer::copy::GO_BACK),
+        "{transcript}"
+    );
+    assert!(transcript.contains("erased"), "{transcript}");
+    assert!(transcript.contains("/dev/sdb"), "{transcript}");
+    assert!(transcript.contains("/dev/vda"), "{transcript}");
+    assert!(transcript.contains("/dev/vda1"), "{transcript}");
+    for phrase in [
+        "filesystem",
+        "format",
+        "/boot/efi",
+        "ext4",
+        "luks (c",
+        installer::copy::FORMAT_TICK,
+        "68.7 GB",
+        "64.4 GB",
+        "/var/home",
+        "20.0 GB",
+        "\u{2514}\u{2500} size",
+    ] {
+        assert!(
+            transcript.contains(phrase),
+            "{phrase} is not drawn: {transcript}"
+        );
+    }
+    assert!(!transcript.contains("opensesame"), "{transcript}");
+    assert!(
+        transcript.contains(installer::copy::SELECT_FORMAT),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("btrfs") && transcript.contains("xfs"),
+        "{transcript}"
+    );
+}
