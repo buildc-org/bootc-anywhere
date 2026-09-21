@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            machine: x86-64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            machine: ARM aarch64
+    runs-on: ${{ matrix.runner }}
+    container: quay.io/centos-bootc/centos-bootc:stream10
+    steps:
+      - name: Install the build tools
+        run: dnf install -y --setopt=install_weak_deps=False cargo git jq file tar gzip binutils
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "installer") | .version')"
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] \
+            || { echo "tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2; exit 1; }
+
+      - name: Build
+        run: cargo build --profile dist --locked
+
+      - name: Package with checksums
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bin=target/dist/bootc-anywhere
+          file "$bin"
+          file "$bin" | grep -q "${MACHINE}"
+          file "$bin" | grep -q interpreter
+          if file "$bin" | grep -q static; then
+            echo "${bin} is statically linked and cannot load libfdisk" >&2
+            exit 1
+          fi
+          floor=GLIBC_2.39
+          needs="$(readelf -V "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
+          if [ "$(printf '%s\n%s\n' "$needs" "$floor" | sort -V | tail -n1)" != "$floor" ]; then
+            echo "${bin} needs ${needs}, above the measured floor ${floor}" >&2
+            exit 1
+          fi
+          asset="bootc-anywhere-v${version}-${ARCH}-linux-gnu.tar.gz"
+          tar -czf "$asset" -C target/dist bootc-anywhere
+          sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
+
+      - name: Hand the tarball to the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.arch }}
+          path: |
+            bootc-anywhere-v*-linux-gnu.tar.gz
+            bootc-anywhere-v*-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Collect both architectures
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          merge-multiple: true
+
+      - name: Attest the tarballs
+        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d
+        with:
+          subject-path: bootc-anywhere-v*-linux-gnu.tar.gz
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            bootc-anywhere-v*-linux-gnu.tar.gz bootc-anywhere-v*-linux-gnu.tar.gz.sha256
