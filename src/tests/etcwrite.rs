@@ -69,8 +69,9 @@ fn the_root_device_is_where_the_layout_put_it() {
 
 #[test]
 fn a_partition_number_is_the_trailing_digits() {
-    assert_eq!(partition_number("/dev/vda3").expect("a number"), "3");
-    assert_eq!(partition_number("/dev/nvme0n1p12").expect("a number"), "12");
-    assert_eq!(partition_number("/dev/mmcblk0p2").expect("a number"), "2");
+    assert_eq!(partition_number("/dev/vda3").expect("a number"), 3);
+    assert_eq!(partition_number("/dev/nvme0n1p12").expect("a number"), 12);
+    assert_eq!(partition_number("/dev/mmcblk0p2").expect("a number"), 2);
     assert!(partition_number("/dev/vda").is_err());
+    assert!(partition_number("/dev/sda99999999999999999999").is_err());
 }

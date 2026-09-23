@@ -26,6 +26,14 @@ pub(crate) fn sys_block() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(SYS_BLOCK))
 }
 
+const DEV: &str = "/dev";
+
+pub(crate) fn dev() -> PathBuf {
+    std::env::var_os("BUILDC_DEV")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEV))
+}
+
 const TTY0_ACTIVE: &str = "/sys/class/tty/tty0/active";
 
 pub(crate) fn tty0_active() -> PathBuf {

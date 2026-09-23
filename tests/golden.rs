@@ -243,28 +243,30 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&lsblk, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let sfdisk = dir.join("sfdisk");
-    std::fs::write(
-        &sfdisk,
-        r#"#!/bin/sh
-case "$1" in
---dump) cat <<'EOF'
-label: gpt
-unit: sectors
-first-lba: 2048
-last-lba: 134217694
-sector-size: 512
-
-/dev/vda1 : start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-/dev/vda2 : start=1050624, size=133169152, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
-/dev/vda3 : start=134219776, size=125829120, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
-EOF
-;;
-esac
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&sfdisk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dev = dir.join("dev");
+    std::fs::create_dir_all(&dev).unwrap();
+    let image = dev.join("vda");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(64 * 1024 * 1024 * 1024))
+        .unwrap();
+    let disk = image.to_string_lossy().to_string();
+    let mut child = std::process::Command::new("sfdisk")
+        .args(["-q", &disk])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sfdisk from util-linux writes the fixture table");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"label: gpt\nsize=512M, type=U\nsize=10G\nsize=10G\n")
+            .unwrap();
+    }
+    assert!(child.wait().unwrap().success());
     for name in ["mount", "umount"] {
         let fake = dir.join(name);
         std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
@@ -299,10 +301,11 @@ esac
         "flow-install-drawn",
         &dir,
         &format!(
-            "stty rows 50 cols 80; PATH='{}':\"$PATH\" BUILDC_INSTALLER_LOCK='{}' BUILDC_SYS_BLOCK='{}' BUILDC_MOUNT_ROOT='{}' BUILDC_EFIVARS='{}' BUILDC_TTY0_ACTIVE='{}' '{}' --from .",
+            "stty rows 50 cols 80; PATH='{}':\"$PATH\" BUILDC_INSTALLER_LOCK='{}' BUILDC_SYS_BLOCK='{}' BUILDC_DEV='{}' BUILDC_MOUNT_ROOT='{}' BUILDC_EFIVARS='{}' BUILDC_TTY0_ACTIVE='{}' '{}' --from .",
             dir.display(),
             dir.join("installer.lock").display(),
             sys.display(),
+            dev.display(),
             dir.join("mounts").display(),
             efivars.display(),
             active.display(),

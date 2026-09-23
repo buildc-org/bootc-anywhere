@@ -28,12 +28,13 @@ pub(crate) struct DiskState {
 
 impl DiskTable {
     pub(crate) fn appendable(&self, deletes: &[String]) -> u64 {
+        let gone = deleted_slots(deletes);
         let end = match self.cleared_by(deletes) {
             true => self.first,
             false => self
                 .slots
                 .iter()
-                .filter(|slot| !deletes.contains(&slot.node))
+                .filter(|slot| !gone.contains(&slot.number))
                 .map(|slot| slot.start.saturating_add(slot.sectors))
                 .max()
                 .unwrap_or(self.first)
@@ -43,7 +44,8 @@ impl DiskTable {
     }
 
     fn cleared_by(&self, deletes: &[String]) -> bool {
-        self.slots.is_empty() || self.slots.iter().all(|slot| deletes.contains(&slot.node))
+        let gone = deleted_slots(deletes);
+        self.slots.is_empty() || self.slots.iter().all(|slot| gone.contains(&slot.number))
     }
 
     pub(crate) fn wrong_label_for(&self, deletes: &[String], creates: usize) -> Option<String> {
@@ -63,12 +65,20 @@ impl DiskTable {
     }
 
     pub(crate) fn surviving(&self, deletes: &[String]) -> Vec<usize> {
+        let gone = deleted_slots(deletes);
         self.slots
             .iter()
-            .filter(|slot| !deletes.contains(&slot.node))
+            .filter(|slot| !gone.contains(&slot.number))
             .map(|slot| slot.number)
             .collect()
     }
+}
+
+fn deleted_slots(deletes: &[String]) -> Vec<usize> {
+    deletes
+        .iter()
+        .filter_map(|device| partition_number(device).ok())
+        .collect()
 }
 
 pub(crate) fn appended_slots(taken: &[usize], count: usize) -> Vec<usize> {
@@ -83,6 +93,7 @@ pub(crate) fn appended_slots(taken: &[usize], count: usize) -> Vec<usize> {
     given
 }
 
+#[cfg(test)]
 pub(crate) fn table_of(dump: &str) -> DiskTable {
     let mut table = DiskTable::default();
     for line in dump.lines() {
@@ -99,9 +110,6 @@ pub(crate) fn table_of(dump: &str) -> DiskTable {
         } else if let Some((node, fields)) = line.split_once(" : ") {
             let node = node.trim().to_string();
             let Ok(at) = partition_number(&node) else {
-                continue;
-            };
-            let Ok(at) = at.parse::<usize>() else {
                 continue;
             };
             let field = |key: &str| {
@@ -124,7 +132,19 @@ pub(crate) fn table_of(dump: &str) -> DiskTable {
     table
 }
 
+fn device_path(disk: &str) -> String {
+    match (cfg!(debug_assertions), disk.strip_prefix("/dev/")) {
+        (true, Some(name)) => env::dev().join(name).to_string_lossy().into_owned(),
+        _ => disk.to_string(),
+    }
+}
+
 pub(crate) fn disk_table(disk: &str) -> Result<DiskTable, String> {
+    fdisk::read_table(&device_path(disk))
+}
+
+#[cfg(test)]
+pub(crate) fn sfdisk_table(disk: &str) -> Result<DiskTable, String> {
     let out = Command::new("sfdisk")
         .args(["--dump", disk])
         .env("LC_ALL", "C")
@@ -148,6 +168,7 @@ pub(crate) fn disk_table(disk: &str) -> Result<DiskTable, String> {
     Ok(table)
 }
 
+#[cfg(test)]
 fn unpartitioned_dump(stderr: &str) -> bool {
     stderr.contains("does not contain a recognized partition table")
 }
@@ -155,7 +176,7 @@ fn unpartitioned_dump(stderr: &str) -> bool {
 pub(crate) fn disk_state(disk: &str) -> Result<DiskState, String> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let metadata = std::fs::metadata(disk).map_err(|err| format!("{disk}: {err}"))?;
+    let metadata = std::fs::metadata(device_path(disk)).map_err(|err| format!("{disk}: {err}"))?;
     Ok(DiskState {
         rdev: metadata.rdev(),
         dev: metadata.dev(),
@@ -192,6 +213,7 @@ impl Drop for DiskLock {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn disk_sectors(disk: &str, sector: u64) -> u64 {
     let sector = match sector {
         0 => 512,
@@ -223,7 +245,7 @@ pub(crate) fn disk_sectors(disk: &str, sector: u64) -> u64 {
 pub(crate) fn created_devices(disk: &str, taken: &[usize], count: usize) -> Vec<String> {
     appended_slots(taken, count)
         .into_iter()
-        .map(|number| partition_device(disk, number))
+        .map(|number| fdisk::partname(disk, number))
         .collect()
 }
 
@@ -232,7 +254,6 @@ pub(crate) fn drawn_slots(parts: &[Partition], deletes: &[String]) -> Vec<usize>
         .iter()
         .filter(|part| !deletes.contains(&part.device))
         .filter_map(|part| partition_number(&part.device).ok())
-        .filter_map(|number| number.parse::<usize>().ok())
         .collect()
 }
 
@@ -252,21 +273,21 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
     if layout.confirmed.as_ref() != Some(&now) {
         return Err(copy::table_changed(&layout.disk));
     }
-    let devices = apply_cuts(layout)?;
-    for (create, device) in layout.creates.iter_mut().zip(devices) {
-        if !settled(Path::new(&device)) {
+    let numbers = apply_cuts(layout)?;
+    for (create, number) in layout.creates.iter_mut().zip(numbers) {
+        let Some(device) = settled_node(&layout.disk, number) else {
             return Err(format!(
-                "{device} was cut but has not appeared: either udev has not \
-                 made the node or sfdisk numbered the new partitions \
-                 differently than the layout drew them"
+                "partition {number} on {} was cut but no device node appeared \
+                 for it; review the disk and install again",
+                layout.disk
             ));
-        }
+        };
         create.device = device;
     }
     Ok(())
 }
 
-pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
+pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
     if layout.deletes.is_empty() && layout.creates.is_empty() {
         return Ok(Vec::new());
     }
@@ -275,26 +296,26 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
         return Err(why);
     }
     let cleared = table.cleared_by(&layout.deletes);
-    let devices = match cleared {
-        true => created_devices(&layout.disk, &[], layout.creates.len()),
-        false => created_devices(
-            &layout.disk,
-            &table.surviving(&layout.deletes),
-            layout.creates.len(),
-        ),
+    let numbers = match cleared {
+        true => appended_slots(&[], layout.creates.len()),
+        false => appended_slots(&table.surviving(&layout.deletes), layout.creates.len()),
     };
+    let numbered = layout
+        .deletes
+        .iter()
+        .map(|device| partition_number(device).map(|number| (device, number)))
+        .collect::<Result<Vec<_>, _>>()?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {
-            for device in &layout.deletes {
-                let number = partition_number(device)?;
+            for (device, number) in numbered {
                 let out = Command::new("sfdisk")
-                    .args(["-q", "--delete", &layout.disk, &number])
+                    .args(["-q", "--delete", &layout.disk, &number.to_string()])
                     .output()
                     .map_err(|err| format!("sfdisk --delete: {err}"))?;
                 if !out.status.success() {
                     return Err(format!(
-                        "removing {device}: {}\n\n{}",
+                        "the cut could not remove {device}: {}\n\n{}",
                         String::from_utf8_lossy(&out.stderr).trim(),
                         copy::table_already_changed(&layout.disk)
                     ));
@@ -318,21 +339,21 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
         .collect();
     sfdisk_script(&layout.disk, &["--append"], &script)?;
     let after = disk_table(&layout.disk)?;
-    check_created_nodes(layout, &devices, &after)?;
-    Ok(devices)
+    check_created_slots(layout, &numbers, &after)?;
+    Ok(numbers)
 }
 
-pub(crate) fn check_created_nodes(
+pub(crate) fn check_created_slots(
     layout: &CustomLayout,
-    devices: &[String],
+    numbers: &[usize],
     after: &DiskTable,
 ) -> Result<(), String> {
-    for (create, device) in layout.creates.iter().zip(devices) {
-        let Some(slot) = after.slots.iter().find(|slot| &slot.node == device) else {
+    for (create, number) in layout.creates.iter().zip(numbers) {
+        let Some(slot) = after.slots.iter().find(|slot| slot.number == *number) else {
             return Err(format!(
-                "{device} is not in the table sfdisk wrote, though it exited 0: \
-                 the new partitions were numbered differently than the layout \
-                 drew them\n\n{}",
+                "partition {number} is not in the partition table the cut \
+                 wrote; the disk numbered the new partitions differently than \
+                 the screen drew them\n\n{}",
                 copy::table_already_changed(&layout.disk)
             ));
         };
@@ -340,8 +361,8 @@ pub(crate) fn check_created_nodes(
         let asked = create.gb.saturating_mul(1_000_000_000);
         if got < asked.saturating_sub(asked / 100) {
             return Err(format!(
-                "{device} was cut at {} GB, not the {} GB it was planned for: \
-                 sfdisk shrank it to fit and did not say so\n\n{}",
+                "partition {number} was cut at {} GB, though the plan asked \
+                 for {} GB; sfdisk shrank it to fit and did not say so\n\n{}",
                 got / 1_000_000_000,
                 create.gb,
                 copy::table_already_changed(&layout.disk)
@@ -374,8 +395,8 @@ fn sfdisk_script(disk: &str, args: &[&str], script: &str) -> Result<(), String> 
     match out.status.success() {
         true => Ok(()),
         false => Err(format!(
-            "writing the partition table on {disk}: {}\n\nthe partition table \
-             on {disk} may already have been changed",
+            "the cut could not write the partition table on {disk}: {}\n\nthe \
+             partition table on {disk} may already have been changed",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }
@@ -384,12 +405,13 @@ fn sfdisk_script(disk: &str, args: &[&str], script: &str) -> Result<(), String> 
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
 const SETTLE_TRIES: usize = 50;
 
-pub(crate) fn settled(device: &Path) -> bool {
+pub(crate) fn settled_node(disk: &str, number: usize) -> Option<String> {
     for _ in 0..SETTLE_TRIES {
-        if device.exists() {
-            return true;
+        let node = fdisk::partname(disk, number);
+        if Path::new(&node).exists() {
+            return Some(node);
         }
         std::thread::sleep(SETTLE);
     }
-    device.exists()
+    None
 }

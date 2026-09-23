@@ -96,10 +96,136 @@ fn a_created_device_follows_the_slot_it_will_get() {
 }
 
 #[test]
+fn a_delete_matches_its_slot_when_lsblk_and_sfdisk_name_it_differently() {
+    // The free regions cannot follow file order because the dump lists part3 before part2.
+    let dump = "label: gpt\n\
+                first-lba: 2048\n\
+                last-lba: 409566\n\
+                sector-size: 512\n\
+                /dev/disk/by-id/ata-X-part1 : start=2048, size=20480\n\
+                /dev/disk/by-id/ata-X-part2 : start=124928, size=20480\n\
+                /dev/disk/by-id/ata-X-part3 : start=22528, size=20480\n";
+    let table = super::table_of(dump);
+    assert_eq!(table.slots.len(), 3);
+    let deletes = vec!["/dev/sda3".to_string()];
+    assert_eq!(table.surviving(&deletes), [1, 2]);
+    let highest = vec!["/dev/sda2".to_string()];
+    assert_eq!(table.appendable(&highest), 409566 + 1 - 43008);
+    assert_ne!(table.appendable(&highest), table.appendable(&[]));
+    assert_eq!(
+        super::created_devices("/dev/disk/by-id/ata-X", &table.surviving(&deletes), 1),
+        ["/dev/disk/by-id/ata-X-part3"]
+    );
+    let all = vec![
+        "/dev/sda1".to_string(),
+        "/dev/sda2".to_string(),
+        "/dev/sda3".to_string(),
+    ];
+    assert_eq!(table.surviving(&all), [] as [usize; 0]);
+    assert_eq!(table.appendable(&all), 409566 + 1 - 2048);
+}
+
+#[test]
+fn a_created_device_with_no_node_beside_it_takes_the_part_branch() {
+    for probe in [
+        "/dev/mapper/mydisk4",
+        "/dev/mapper/mydiskp4",
+        "/dev/mapper/mydisk5",
+        "/dev/mapper/mydiskp5",
+        "/dev/disk/by-id/wwn-0x50004",
+        "/dev/disk/by-id/wwn-0x5000p4",
+    ] {
+        assert!(
+            !std::path::Path::new(probe).exists(),
+            "{probe} exists on this host, so the fallback is not what this case reads"
+        );
+    }
+    let table = super::table_of(MEASURED_DUMP);
+    assert_eq!(
+        super::created_devices("/dev/mapper/mydisk", &table.surviving(&[]), 2),
+        ["/dev/mapper/mydisk-part4", "/dev/mapper/mydisk-part5"]
+    );
+    assert_eq!(
+        super::created_devices("/dev/disk/by-id/wwn-0x5000", &table.surviving(&[]), 1),
+        ["/dev/disk/by-id/wwn-0x5000-part4"]
+    );
+}
+
+#[test]
 fn a_created_esp_is_cut_as_an_efi_partition() {
     assert_eq!(super::created_type("/boot/efi"), "U");
     assert_eq!(super::created_type("/"), "L");
     assert_eq!(super::created_type(""), "L");
+}
+
+#[test]
+fn a_delete_the_cut_cannot_number_takes_nothing_off_the_disk() {
+    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
+        return;
+    };
+    if !sfdisk.status.success() {
+        return;
+    }
+    let root = scratch("cut-unnamed-delete");
+    let image = root.join("disk.img");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(200 * 1024 * 1024))
+        .expect("a backing file");
+    let disk = image.to_string_lossy().to_string();
+    let script = "label: gpt
+size=20M, name=one
+size=20M, name=two
+";
+    let mut child = Command::new("sfdisk")
+        .args(["-q", &disk])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("sfdisk");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("the starting table");
+    assert!(child.wait().expect("sfdisk").success());
+    let before = super::disk_table(&disk).expect("the table");
+
+    let layout = CustomLayout {
+        disk: disk.clone(),
+        deletes: vec![format!("{disk}1"), format!("{disk}-spare")],
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    let err = super::apply_cuts(&layout).expect_err("a delete naming no number");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
+
+    let overflowed = CustomLayout {
+        deletes: vec![format!("{disk}1"), format!("{disk}99999999999999999999")],
+        ..layout.clone()
+    };
+    let err = super::apply_cuts(&overflowed).expect_err("a delete that overflows");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
+
+    let cleared = CustomLayout {
+        deletes: vec![
+            format!("{disk}1"),
+            format!("{disk}2"),
+            format!("{disk}-spare"),
+        ],
+        ..layout.clone()
+    };
+    let err = super::apply_cuts(&cleared).expect_err("a delete naming no number");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
 }
 
 #[test]
@@ -160,7 +286,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
     assert_eq!(drew, [format!("{disk}2"), format!("{disk}4")]);
 
     let cut = super::apply_cuts(&layout).expect("the cut");
-    assert_eq!(cut, drew, "the cut must return the nodes the screen drew");
+    assert_eq!(cut, [2, 4], "the cut must return the slots the screen drew");
 
     let after = super::disk_table(&disk).expect("the table after");
     let numbers: Vec<usize> = {
@@ -257,7 +383,7 @@ fn a_partition_sfdisk_had_to_shrink_stops_the_install() {
 }
 
 #[test]
-fn a_created_node_missing_from_the_read_back_table_stops_the_install() {
+fn a_created_slot_missing_from_the_read_back_table_stops_the_install() {
     let disk = "/dev/vda";
     let layout = CustomLayout {
         disk: disk.to_string(),
@@ -269,9 +395,45 @@ fn a_created_node_missing_from_the_read_back_table_stops_the_install() {
         }],
         ..Default::default()
     };
-    let err = super::check_created_nodes(&layout, &[format!("{disk}1")], &DiskTable::default())
-        .expect_err("a missing sfdisk node must stop the install");
+    let err = super::check_created_slots(&layout, &[1], &DiskTable::default())
+        .expect_err("a missing sfdisk slot must stop the install");
     assert!(err.contains(&copy::table_already_changed(disk)), "{err}");
+}
+
+#[test]
+fn a_created_slot_is_checked_by_number_when_the_node_name_differs() {
+    let layout = CustomLayout {
+        disk: "/dev/mapper/mydisk".to_string(),
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    let after = DiskTable {
+        label: "gpt".to_string(),
+        sector: 512,
+        slots: vec![Slot {
+            node: "/dev/mapper/mydisk2".to_string(),
+            number: 2,
+            start: 40960,
+            sectors: 1_000_000_000 / 512,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(super::check_created_slots(&layout, &[2], &after), Ok(()));
+    let short = DiskTable {
+        slots: vec![Slot {
+            node: "/dev/mapper/mydisk2".to_string(),
+            number: 2,
+            start: 40960,
+            sectors: 1_000_000 / 512,
+        }],
+        ..after.clone()
+    };
+    assert!(super::check_created_slots(&layout, &[2], &short).is_err());
 }
 
 #[test]
@@ -426,7 +588,7 @@ fn a_blank_and_a_dos_disk_are_cut_as_gpt() {
             ..Default::default()
         };
         let cut = super::apply_cuts(&layout).unwrap_or_else(|err| panic!("cutting {name}: {err}"));
-        assert_eq!(cut, [format!("{disk}1"), format!("{disk}2")], "{name}");
+        assert_eq!(cut, [1, 2], "{name}");
         let after = super::disk_table(&disk).expect("the table after");
         assert_eq!(after.label, "gpt", "{name} came out {}", after.label);
         assert_eq!(after.slots.len(), 2, "{name}");
@@ -476,8 +638,47 @@ fn the_derived_span_counts_in_the_disks_own_sectors() {
 }
 
 #[test]
-fn a_node_that_exists_settles_at_once() {
-    assert!(super::settled(Path::new("/dev/null")));
+fn an_existing_node_is_taken_at_once() {
+    let root = scratch("settled-node");
+    let disk = root.join("disk.img");
+    std::fs::File::create(&disk).expect("the disk");
+    let node = root.join("disk.img1");
+    std::fs::File::create(&node).expect("the node");
+    assert_eq!(
+        super::settled_node(&disk.to_string_lossy(), 1),
+        Some(node.to_string_lossy().into_owned())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_cut_whose_node_never_appears_stops_the_install() {
+    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
+        return;
+    };
+    if !sfdisk.status.success() {
+        return;
+    }
+    let root = scratch("cut-node-wait");
+    let image = root.join("disk.img");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(8 * 1024 * 1024 * 1024))
+        .expect("a backing file");
+    let disk = image.to_string_lossy().to_string();
+    let mut layout = CustomLayout {
+        disk: disk.clone(),
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    layout.confirmed = Some(super::disk_state(&disk).expect("the disk state"));
+    let err = super::cut_partitions(&mut layout).expect_err("no node grows on a file");
+    assert!(err.contains("no device node appeared"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

@@ -752,17 +752,6 @@ pub(crate) fn confirm_disk(device: &str, disks: &[(String, String)]) -> Result<b
     )
 }
 
-pub(crate) fn partition_device(disk: &str, number: usize) -> String {
-    match disk
-        .chars()
-        .last()
-        .is_some_and(|last| last.is_ascii_digit())
-    {
-        true => format!("{disk}p{number}"),
-        false => format!("{disk}{number}"),
-    }
-}
-
 pub(crate) fn container_number(payload: &Payload) -> usize {
     let plan = automatic_rows(payload, "", None, false, false);
     1 + plan
@@ -871,31 +860,55 @@ pub(crate) fn edit_luks(
 }
 
 pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
-    let mut fields = vec![common::ui::Field::measure(copy::NEW_SIZE, "", "GB")];
-    let mut left: Vec<usize> = Vec::new();
-    let filled = common::ui::in_titled_overlay(
-        common::ui::WINDOW_WIDTH,
-        8,
-        copy::NEW_PARTITION,
-        || {
-            common::ui::form(
-                &mut fields,
-                &[],
-                |fields| size_short_of(&fields[0].value(), room),
-                |_| Vec::new(),
-                |_| vec![0],
-                copy::SUBMIT_KEYS,
-                &[],
-                &[],
-                0,
-                &mut left,
-            )
-        },
-    )?;
-    match filled {
-        common::ui::Filled::Took(_) => Ok(size_gb(&fields[0].value())),
-        _ => Ok(None),
+    let mut typed = String::new();
+    let mut refusal = String::new();
+    loop {
+        let label = match refusal.is_empty() {
+            true => copy::NEW_SIZE.to_string(),
+            false => refusal.clone(),
+        };
+        let mut fields = vec![common::ui::Field::measure(&label, &typed, "GB")];
+        let mut left: Vec<usize> = Vec::new();
+        let filled = common::ui::in_titled_overlay(
+            common::ui::WINDOW_WIDTH,
+            8,
+            copy::NEW_PARTITION,
+            || {
+                common::ui::form(
+                    &mut fields,
+                    &[],
+                    |fields| size_short_of(&fields[0].value(), room),
+                    |_| Vec::new(),
+                    |_| vec![0],
+                    copy::SUBMIT_KEYS,
+                    &[],
+                    &[],
+                    0,
+                    &mut left,
+                )
+            },
+        )?;
+        if !submitted(filled) {
+            return Ok(None);
+        }
+        typed = fields[0].value();
+        match size_short_of(&typed, room) {
+            None => return Ok(size_gb(&typed)),
+            Some(said) => {
+                refusal = match said.is_empty() {
+                    true => copy::NEW_SIZE_NEEDED.to_string(),
+                    false => said,
+                }
+            }
+        }
     }
+}
+
+pub(crate) fn submitted(filled: common::ui::Filled) -> bool {
+    matches!(
+        filled,
+        common::ui::Filled::Took(_) | common::ui::Filled::Changed(_)
+    )
 }
 
 pub(crate) fn size_short_of(typed: &str, room: u64) -> Option<String> {

@@ -561,3 +561,14 @@ fn the_luks_window_reopens_on_the_secret_the_kind_owes() {
     assert_eq!(luks_window_start("tpm2-luks"), None);
     assert_eq!(luks_window_start(NONE), None);
 }
+
+#[test]
+fn the_size_window_submits_on_the_key_its_field_answers_with() {
+    use common::ui::Filled;
+    assert!(super::submitted(Filled::Changed(0)));
+    assert!(super::submitted(Filled::Took(0)));
+    assert!(!super::submitted(Filled::Left));
+    assert!(super::size_short_of("0", 100).is_some());
+    assert_eq!(super::size_short_of("20", 100), None);
+    assert!(super::size_short_of("", 100).is_some());
+}

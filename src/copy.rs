@@ -246,6 +246,7 @@ pub const CLEAR_PARTS: &str = "Clear partitions";
 pub const CREATE_PART: &str = "Create partition";
 pub const NEW_PARTITION: &str = "create partition";
 pub const NEW_SIZE: &str = "size";
+pub const NEW_SIZE_NEEDED: &str = "a size is needed";
 pub const CELL_REMOVE: &str = "remove";
 pub const CELL_NEW: &str = "new";
 pub fn clear_all(count: usize) -> String {

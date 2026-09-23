@@ -383,7 +383,7 @@ fn random_key() -> Result<Vec<u8>, String> {
 }
 
 fn retag_root(disk: &str, open: &LuksOpen, mapper: &str) -> Result<(), String> {
-    let number = partition_number(&open.partition)?;
+    let number = partition_number(&open.partition)?.to_string();
     close_volume(mapper)?;
     let out = Command::new("sfdisk")
         .args(["--part-type", disk, &number, ROOT_GUID])
@@ -399,8 +399,8 @@ fn retag_root(disk: &str, open: &LuksOpen, mapper: &str) -> Result<(), String> {
     open_volume(open, mapper)
 }
 
-pub(crate) fn partition_number(device: &str) -> Result<String, String> {
-    let number: String = device
+pub(crate) fn partition_number(device: &str) -> Result<usize, String> {
+    let digits: String = device
         .chars()
         .rev()
         .take_while(char::is_ascii_digit)
@@ -408,8 +408,7 @@ pub(crate) fn partition_number(device: &str) -> Result<String, String> {
         .into_iter()
         .rev()
         .collect();
-    match number.is_empty() {
-        true => Err(format!("{device} names no partition number")),
-        false => Ok(number),
-    }
+    digits
+        .parse()
+        .map_err(|_| format!("{device} names no partition number"))
 }

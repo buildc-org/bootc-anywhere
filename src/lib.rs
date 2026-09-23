@@ -16,6 +16,7 @@ mod disks;
 mod editor;
 mod env;
 mod etcwrite;
+mod fdisk;
 mod form;
 mod lock;
 mod panel;
