@@ -7,6 +7,7 @@ mod boot;
 mod discover;
 mod disks;
 mod editor;
+mod esp;
 mod etcwrite;
 mod fdisk;
 mod form;
@@ -49,12 +50,64 @@ fn a_payload() -> Payload {
         composefs: false,
         reserve: std::sync::OnceLock::new(),
         luks_initramfs: true,
+        esp_entries: std::sync::OnceLock::new(),
     };
     payload
         .reserve
         .set(10)
         .expect("a reserve nothing has read yet");
     payload
+        .esp_entries
+        .set(Vec::new())
+        .expect("entries nothing has read yet");
+    payload
+}
+
+fn a_payload_writing(entries: &[&str]) -> Payload {
+    let mut payload = a_payload();
+    payload.esp_entries = std::sync::OnceLock::new();
+    payload
+        .esp_entries
+        .set(entries.iter().map(|entry| entry.to_string()).collect())
+        .expect("entries nothing has read yet");
+    payload
+}
+
+fn part(device: &str, fstype: &str) -> Partition {
+    Partition {
+        device: device.to_string(),
+        fstype: fstype.to_string(),
+        ..Default::default()
+    }
+}
+
+fn label(name: &str) -> Label {
+    Label {
+        name: name.to_string(),
+        link: String::new(),
+    }
+}
+
+fn scan_of(disks: &[(&str, &str)], parts: &[(&str, Vec<Partition>)]) -> Scan {
+    Scan {
+        unread: Vec::new(),
+        disks: disks
+            .iter()
+            .map(|(device, detail)| DiskScan {
+                device: device.to_string(),
+                detail: detail.to_string(),
+                partitions: parts
+                    .iter()
+                    .find(|(at, _)| at == device)
+                    .map(|(_, parts)| parts.to_vec())
+                    .unwrap_or_default(),
+                carries: false,
+                table: Ok(DiskTable::default()),
+                labels: Vec::new(),
+                keys: Discovered::default(),
+            })
+            .collect(),
+    }
 }
 
 const EMITTED: &str = r#"{

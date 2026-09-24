@@ -26,21 +26,70 @@ pub(crate) struct DiskState {
     pub(crate) table: DiskTable,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Region {
+    pub(crate) start: u64,
+    pub(crate) sectors: u64,
+}
+
 impl DiskTable {
-    pub(crate) fn appendable(&self, deletes: &[String]) -> u64 {
+    pub(crate) fn regions(&self, deletes: &[String]) -> Vec<Region> {
         let gone = deleted_slots(deletes);
-        let end = match self.cleared_by(deletes) {
-            true => self.first,
+        let mut survivors: Vec<&Slot> = match self.cleared_by(deletes) {
+            true => Vec::new(),
             false => self
                 .slots
                 .iter()
                 .filter(|slot| !gone.contains(&slot.number))
-                .map(|slot| slot.start.saturating_add(slot.sectors))
-                .max()
-                .unwrap_or(self.first)
-                .max(self.first),
+                .collect(),
         };
-        self.last.saturating_add(1).saturating_sub(end)
+        survivors.sort_by_key(|slot| slot.start);
+        let mut regions = Vec::new();
+        let mut at = self.first;
+        for slot in survivors {
+            if slot.start > at {
+                regions.push(Region {
+                    start: at,
+                    sectors: slot.start - at,
+                });
+            }
+            at = at.max(slot.start.saturating_add(slot.sectors));
+        }
+        if at <= self.last {
+            regions.push(Region {
+                start: at,
+                sectors: self.last.saturating_add(1) - at,
+            });
+        }
+        regions
+    }
+
+    pub(crate) fn aligned(&self, region: &Region) -> Region {
+        let align = self.alignment();
+        let start = region.start.div_ceil(align) * align;
+        let end = (region.start.saturating_add(region.sectors)) / align * align;
+        Region {
+            start,
+            sectors: end.saturating_sub(start),
+        }
+    }
+
+    fn alignment(&self) -> u64 {
+        // sfdisk aligns a new partition to one MiB, so the plan trims each free region to that boundary.
+        match self.sector {
+            0 => 2048,
+            sector => (1_048_576 / sector).max(1),
+        }
+    }
+
+    pub(crate) fn placeable_gb(&self, region: &Region) -> u64 {
+        let region = self.aligned(region);
+        let sector = self.sector.max(1);
+        region
+            .sectors
+            .saturating_mul(sector)
+            .saturating_sub(2 * sector.saturating_sub(1))
+            / 1_000_000_000
     }
 
     fn cleared_by(&self, deletes: &[String]) -> bool {
@@ -48,20 +97,19 @@ impl DiskTable {
         self.slots.is_empty() || self.slots.iter().all(|slot| gone.contains(&slot.number))
     }
 
-    pub(crate) fn wrong_label_for(&self, deletes: &[String], creates: usize) -> Option<String> {
-        if creates == 0 {
+    pub(crate) fn wrong_label_for(
+        &self,
+        deletes: &[String],
+        creates: usize,
+        renames: usize,
+    ) -> Option<String> {
+        if creates == 0 && renames == 0 {
             return None;
         }
         match self.label.is_empty() || self.label == "gpt" || self.cleared_by(deletes) {
             true => None,
             false => Some(copy::custom_not_gpt(&self.label)),
         }
-    }
-
-    pub(crate) fn appendable_gb(&self, deletes: &[String]) -> u64 {
-        self.appendable(deletes)
-            .saturating_mul(self.sector)
-            .saturating_div(1_000_000_000)
     }
 
     pub(crate) fn surviving(&self, deletes: &[String]) -> Vec<usize> {
@@ -91,6 +139,132 @@ pub(crate) fn appended_slots(taken: &[usize], count: usize) -> Vec<usize> {
         number += 1;
     }
     given
+}
+
+pub(crate) struct Rooms {
+    pub(crate) first: u64,
+    pub(crate) largest: u64,
+}
+
+pub(crate) fn place_creates(
+    table: &DiskTable,
+    deletes: &[String],
+    creates: &[Created],
+) -> Result<(Vec<u64>, Vec<Region>), u64> {
+    let sector = table.sector.max(1);
+    let mut free = table.regions(deletes);
+    let mut starts = Vec::new();
+    for create in creates {
+        let before = create.offset.saturating_mul(1_000_000_000).div_ceil(sector);
+        let size = create.gb.saturating_mul(1_000_000_000).div_ceil(sector);
+        let chosen = free.iter().position(|region| {
+            let aligned = table.aligned(region);
+            before.saturating_add(size) <= aligned.sectors
+        });
+        let Some(at) = chosen else {
+            let largest = free
+                .iter()
+                .map(|region| table.placeable_gb(region))
+                .max()
+                .unwrap_or(0);
+            return Err(largest);
+        };
+        let region = free.remove(at);
+        let aligned = table.aligned(&region);
+        let start = aligned.start.saturating_add(before);
+        starts.push(start);
+        if aligned.start < start {
+            free.push(Region {
+                start: aligned.start,
+                sectors: start - aligned.start,
+            });
+        }
+        let end = start.saturating_add(size);
+        let last = region.start.saturating_add(region.sectors);
+        if end < last {
+            free.push(Region {
+                start: end,
+                sectors: last - end,
+            });
+        }
+        free.sort_by_key(|region| region.start);
+    }
+    Ok((starts, free))
+}
+
+pub(crate) fn create_rooms(table: &DiskTable, deletes: &[String], creates: &[Created]) -> Rooms {
+    let free = match place_creates(table, deletes, creates) {
+        Ok((_, free)) => free,
+        Err(largest) => return Rooms { first: 0, largest },
+    };
+    let rooms = free
+        .iter()
+        .map(|region| table.placeable_gb(region))
+        .filter(|room| *room > 0);
+    let mut first = 0;
+    let mut largest = 0;
+    for room in rooms {
+        if first == 0 {
+            first = room;
+        }
+        largest = largest.max(room);
+    }
+    Rooms { first, largest }
+}
+
+pub(crate) fn create_holes(
+    table: &DiskTable,
+    deletes: &[String],
+    creates: &[Created],
+    names: &[(usize, String)],
+) -> Vec<common::ui::Hole> {
+    let Ok((starts, free)) = place_creates(table, deletes, creates) else {
+        return Vec::new();
+    };
+    let sector = table.sector.max(1);
+    let gone = deleted_slots(deletes);
+    let mut taken: Vec<(usize, u64, u64)> = table
+        .slots
+        .iter()
+        .filter(|slot| !gone.contains(&slot.number))
+        .map(|slot| {
+            (
+                slot.number,
+                slot.start,
+                slot.start.saturating_add(slot.sectors),
+            )
+        })
+        .collect();
+    let numbers = appended_slots(&table.surviving(deletes), creates.len());
+    for ((number, start), create) in numbers.into_iter().zip(starts).zip(creates) {
+        let size = create.gb.saturating_mul(1_000_000_000).div_ceil(sector);
+        taken.push((number, start, start.saturating_add(size)));
+    }
+    let named = |slot: &(usize, u64, u64)| {
+        names
+            .iter()
+            .find(|(number, _)| *number == slot.0)
+            .map_or_else(|| slot.0.to_string(), |(_, name)| name.clone())
+    };
+    free.iter()
+        .filter_map(|region| {
+            let gb = table.placeable_gb(region);
+            let end = region.start.saturating_add(region.sectors);
+            let before = taken
+                .iter()
+                .filter(|slot| slot.2 <= region.start)
+                .max_by_key(|slot| slot.2);
+            let after = taken
+                .iter()
+                .filter(|slot| slot.1 >= end)
+                .min_by_key(|slot| slot.1);
+            (gb > 0).then(|| common::ui::Hole {
+                before: before.map(named),
+                after: after.map(named),
+                gb,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -265,7 +439,7 @@ pub(crate) fn created_type(target: &str) -> &'static str {
 }
 
 pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() {
+    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
         return Ok(());
     }
     let _lock = DiskLock::take(&layout.disk)?;
@@ -288,11 +462,13 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
 }
 
 pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() {
+    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
         return Ok(Vec::new());
     }
     let table = disk_table(&layout.disk)?;
-    if let Some(why) = table.wrong_label_for(&layout.deletes, layout.creates.len()) {
+    if let Some(why) =
+        table.wrong_label_for(&layout.deletes, layout.creates.len(), layout.renames.len())
+    {
         return Err(why);
     }
     let cleared = table.cleared_by(&layout.deletes);
@@ -305,6 +481,13 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
         .iter()
         .map(|device| partition_number(device).map(|number| (device, number)))
         .collect::<Result<Vec<_>, _>>()?;
+    let renamed = layout
+        .renames
+        .iter()
+        .map(|rename| partition_number(&rename.partition).map(|number| (rename, number)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (starts, _) = place_creates(&table, &layout.deletes, &layout.creates)
+        .map_err(|room| copy::custom_too_big(room))?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {
@@ -323,23 +506,30 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
             }
         }
     }
-    if layout.creates.is_empty() {
-        return Ok(Vec::new());
+    if !layout.creates.is_empty() {
+        let script: String = layout
+            .creates
+            .iter()
+            .zip(&starts)
+            .map(|(create, start)| {
+                let name = match create.label.is_empty() {
+                    true => String::new(),
+                    false => format!(", name=\"{}\"", create.label),
+                };
+                format!(
+                    "start={start}, size={}GB, type={}{name}\n",
+                    create.gb,
+                    created_type(&create.target)
+                )
+            })
+            .collect();
+        sfdisk_script(&layout.disk, &["--append"], &script)?;
+        let after = disk_table(&layout.disk)?;
+        check_created_slots(layout, &numbers, &after)?;
     }
-    let script: String = layout
-        .creates
-        .iter()
-        .map(|create| {
-            format!(
-                "size={}GB, type={}\n",
-                create.gb,
-                created_type(&create.target)
-            )
-        })
-        .collect();
-    sfdisk_script(&layout.disk, &["--append"], &script)?;
-    let after = disk_table(&layout.disk)?;
-    check_created_slots(layout, &numbers, &after)?;
+    for (rename, number) in renamed {
+        part_label(&layout.disk, number, &rename.label)?;
+    }
     Ok(numbers)
 }
 
@@ -398,6 +588,26 @@ fn sfdisk_script(disk: &str, args: &[&str], script: &str) -> Result<(), String> 
             "the cut could not write the partition table on {disk}: {}\n\nthe \
              partition table on {disk} may already have been changed",
             String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+fn part_label(disk: &str, number: usize, label: &str) -> Result<(), String> {
+    let out = Command::new("sfdisk")
+        .args(["-q", "--part-label", disk, &number.to_string(), label])
+        .output()
+        .map_err(|err| {
+            format!(
+                "sfdisk --part-label: {err}\n\n{}",
+                copy::table_already_changed(disk)
+            )
+        })?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "the cut could not name partition {number} on {disk}: {}\n\n{}",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            copy::table_already_changed(disk)
         )),
     }
 }

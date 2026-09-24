@@ -67,6 +67,7 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         .current_dir(dir)
         .env("COLUMNS", "80")
         .env("BUILDC_TPM", "/nonexistent")
+        .env("BUILDC_CARET", "static")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -96,7 +97,21 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         input.write_all(keys).unwrap();
         input.flush().unwrap();
     }
-    let status = child.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break status,
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            None => {
+                child
+                    .kill()
+                    .expect("the installer is killed at the deadline");
+                break child.wait().unwrap();
+            }
+        }
+    };
     reader.join().unwrap();
     let mut errors = String::new();
     child
@@ -267,11 +282,48 @@ esac
             .unwrap();
     }
     assert!(child.wait().unwrap().success());
-    for name in ["mount", "umount"] {
-        let fake = dir.join(name);
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let other = dev.join("sdb");
+    std::fs::File::create(&other)
+        .and_then(|file| file.set_len(16 * 1024 * 1024 * 1024))
+        .unwrap();
+    let other_disk = other.to_string_lossy().to_string();
+    let mut child = std::process::Command::new("sfdisk")
+        .args(["-q", &other_disk])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sfdisk from util-linux writes the fixture table");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"label: gpt\n")
+            .unwrap();
     }
+    assert!(child.wait().unwrap().success());
+    let fake_mount = dir.join("mount");
+    std::fs::write(
+        &fake_mount,
+        r#"#!/bin/sh
+# `mount_ro` passes the device third and the mount point last.
+case "$3" in
+/dev/vda1) mkdir -p "$4/EFI/fedora" ;;
+/dev/vda2)
+    mkdir -p "$4/etc"
+    printf 'PRETTY_NAME="Test OS"\n' > "$4/etc/os-release"
+    ;;
+esac
+exit 0
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_mount, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_umount = dir.join("umount");
+    std::fs::write(&fake_umount, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_umount, std::fs::Permissions::from_mode(0o755)).unwrap();
     let cryptsetup = dir.join("cryptsetup");
     std::fs::write(
         &cryptsetup,
@@ -284,6 +336,18 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&cryptsetup, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let podman = dir.join("podman");
+    std::fs::write(
+        &podman,
+        r#"#!/bin/sh
+case "$*" in
+*"/usr/lib/efi"*) printf '%s\n' /usr/lib/efi/grub2/1/EFI/fedora /usr/lib/efi/shim/1/EFI/BOOT ;;
+*) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
     let efivars = dir.join("efivars");
     std::fs::create_dir_all(&efivars).unwrap();
     for (name, value) in [("SecureBoot", 0u8), ("SetupMode", 1u8)] {
@@ -318,7 +382,7 @@ esac
             b"\r",
             b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
             b"\x1b[A",
-            b"\x1b[B", 
+            b"deb2\r",
             b"tect\r",
             b"hunter2\r",
             b"hunter2\r",
@@ -333,6 +397,7 @@ esac
             b"", 
             b"\r", 
             b"", 
+            b"\x1b[A", 
             b"\x1b[A", 
             b"\r", 
             b"\x1b[B", 
@@ -362,6 +427,14 @@ esac
             b"\r", 
             b"\x1b[B", 
             b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
+            b"\r", 
+            b"\x1b[B", 
+            b"\r", 
             b"\x1b[B", 
             b"\r", 
             b"\r", 
@@ -372,12 +445,6 @@ esac
             b"\r", 
             b"\r", 
             b"\x1b[B", 
-            b"\r", 
-            b"\r", 
-            b"\r", 
-            b"\x1b[B", 
-            b"\r", 
-            b"\r", 
             b"\x1b[B", 
             b"\x1b[C", 
             b"\r", 
@@ -398,14 +465,14 @@ esac
     assert!(!transcript.contains("hunter2"), "{transcript}");
     for phrase in [
         "OS Image",
-        "Detected System Firmware",
+        installer::copy::PANEL_FIRMWARE,
         "bootloader",
         installer::copy::FIRMWARE_SETUP,
     ] {
         assert!(transcript.contains(phrase), "{phrase} is not on the screen");
     }
     assert!(
-        transcript.contains("Missing: installation disk, username, password"),
+        transcript.contains("Missing: hostname, installation disk, username, password"),
         "{transcript}"
     );
     assert!(
@@ -435,7 +502,8 @@ esac
         "format",
         "/boot/efi",
         "ext4",
-        "luks (c",
+        "linux",
+        "luks(closed)",
         installer::copy::FORMAT_TICK,
         "68.7 GB",
         "64.4 GB",
@@ -443,6 +511,12 @@ esac
         "20.0 GB",
         "\u{2514}\u{2500} size",
     ] {
+        assert!(
+            transcript.contains(phrase),
+            "{phrase} is not drawn: {transcript}"
+        );
+    }
+    for phrase in ["fedora", "Test OS"] {
         assert!(
             transcript.contains(phrase),
             "{phrase} is not drawn: {transcript}"

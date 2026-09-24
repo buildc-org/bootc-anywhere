@@ -205,8 +205,8 @@ fn a_4kn_disk_with_no_label_reports_the_same_room_through_both() {
 
     assert_eq!(dumped.sector, 512, "the sfdisk reader falls back to 512");
     assert_eq!(read.sector, 4096, "libfdisk asks the device");
-    let by_dump = dumped.appendable(&[]) * dumped.sector;
-    let by_lib = read.appendable(&[]) * read.sector;
+    let by_dump = dumped.regions(&[])[0].sectors * dumped.sector;
+    let by_lib = read.regions(&[])[0].sectors * read.sector;
     assert!(
         by_dump >= by_lib,
         "the fallback reader must stay the optimistic side: {by_dump} against {by_lib}"

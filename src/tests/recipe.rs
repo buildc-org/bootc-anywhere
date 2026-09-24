@@ -62,18 +62,22 @@ fn the_assign_list_follows_the_filesystem() {
         parttype: String::new(),
         uuid: String::new(),
     };
-    assert_eq!(assigns(&partition("vfat"), None), ["/boot/efi"]);
+    assert_eq!(assigns(&partition("vfat"), None, true), ["/boot/efi"]);
     assert_eq!(
-        assigns(&partition("ext4"), None),
+        assigns(&partition("ext4"), None, true),
+        ["/", "/boot", "/var", "/var/home"]
+    );
+    assert_eq!(
+        assigns(&partition("ext4"), None, false),
         ["/", "/var", "/var/home"]
     );
-    assert_eq!(assigns(&partition("swap"), None), ["/swap"]);
-    assert!(assigns(&partition(""), None).is_empty());
+    assert_eq!(assigns(&partition("swap"), None, true), ["/swap"]);
+    assert!(assigns(&partition(""), None, true).is_empty());
     let chosen = Mounted {
         target: String::new(),
         fstype: "fat32".to_string(),
     };
-    assert_eq!(assigns(&partition(""), Some(&chosen)), ["/boot/efi"]);
+    assert_eq!(assigns(&partition(""), Some(&chosen), true), ["/boot/efi"]);
 }
 
 #[test]

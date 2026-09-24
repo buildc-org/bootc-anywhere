@@ -36,10 +36,22 @@ pub fn table_changed(disk: &str) -> String {
 pub fn custom_not_gpt(label: &str) -> String {
     format!("this disk has a {label} partition table: clear it to use GPT")
 }
+
+pub fn esp_entry_name(entry: &str) -> String {
+    format!("`{entry}` is not one entry name under EFI")
+}
+
+pub fn esp_entry_missing(path: &str, why: &str) -> String {
+    format!("{path} is not on the ESP: {why}")
+}
+
+pub fn esp_entry_remove(path: &str, why: &str) -> String {
+    format!("removing {path}: {why}")
+}
 pub fn custom_too_big(gb: u64) -> String {
     match gb {
         0 => "no room left on the disk for a new partition".to_string(),
-        gb => format!("only {gb} GB is free after the last partition"),
+        gb => format!("only {gb} GB is free in the largest free region"),
     }
 }
 
@@ -204,6 +216,10 @@ pub fn removing_partitions(disk: &str, count: usize) -> String {
 pub fn summary_deleted(partition: &str) -> String {
     format!("{partition}  DELETED, contents lost")
 }
+
+pub fn summary_esp(entry: &str, partition: &str) -> String {
+    format!("{entry} boot entry on {partition} is removed")
+}
 pub fn summary_created(gb: u64, fstype: &str) -> String {
     format!("a new {gb} GB partition, format as {fstype}")
 }
@@ -232,6 +248,10 @@ pub const LAYOUT_MANUAL: &str = "manual";
 pub fn layout_headings() -> [&'static str; 5] {
     ["size", "filesystem", "format", "type", "mount"]
 }
+
+pub fn layout_widths() -> [usize; 5] {
+    [8, 12, 6, 5, 9]
+}
 pub const ASSIGN: &str = "Assign";
 pub const UNASSIGN: &str = "Unassign";
 pub const FORMAT_ROW: &str = "Format";
@@ -241,11 +261,16 @@ pub const USE_DISK_ACTION: &str = "Use this disk";
 pub const CHOOSE_KEYS: &str =
     "\u{2191}\u{2193} navigate \u{2022} \u{23ce}  confirm \u{2022} Esc back";
 pub const RESET_CHANGES: &str = "Reset changes";
-pub const DELETE_PART: &str = "Delete partition";
+pub const DELETE_PART: &str = "Delete";
 pub const CLEAR_PARTS: &str = "Clear partitions";
 pub const CREATE_PART: &str = "Create partition";
+pub const RENAME_PART: &str = "Rename";
 pub const NEW_PARTITION: &str = "create partition";
-pub const NEW_SIZE: &str = "size";
+pub const NEW_NAME: &str = "name";
+pub const NAME_NEEDED: &str = "a name is needed";
+pub const ROW_OFFSET: &str = "Start offset";
+pub const ROW_PARTITION_SIZE: &str = "Partition size";
+pub const ROW_AVAILABLE: &str = "Available";
 pub const NEW_SIZE_NEEDED: &str = "a size is needed";
 pub const CELL_REMOVE: &str = "remove";
 pub const CELL_NEW: &str = "new";
@@ -256,12 +281,12 @@ pub const OPEN_ENCRYPTED: &str = "Open Encrypted Partition";
 pub const CLOSE_ENCRYPTED: &str = "Close Encrypted Partition";
 pub const NO_FORMAT: &str = "Do not format";
 pub const FORMAT_TICK: &str = "\u{2713}";
-pub const LUKS_OPEN: &str = "luks (open)";
-pub const LUKS_CLOSED: &str = "luks (closed)";
+pub const LUKS_OPEN: &str = "luks(open)";
+pub const LUKS_CLOSED: &str = "luks(closed)";
 pub const EFI_CELL: &str = "efi";
 
-pub fn mount_points() -> [&'static str; 5] {
-    ["/boot/efi", "/", "/var", "/var/home", "/swap"]
+pub fn mount_points() -> [&'static str; 6] {
+    ["/boot/efi", "/", "/boot", "/var", "/var/home", "/swap"]
 }
 
 pub fn format_options() -> [&'static str; 5] {
@@ -338,7 +363,7 @@ pub fn written_over(
 }
 pub const ROW_DISK: &str = "disk";
 pub const DISK_SELECTION: &str = "disk selection";
-pub const ROW_HOSTNAME: &str = "computer name";
+pub const ROW_HOSTNAME: &str = "hostname";
 pub const ROW_ACCOUNT: &str = "username";
 pub const ROW_PASSWORD: &str = "password";
 pub const ROW_ENCRYPTION: &str = "encryption";
@@ -399,7 +424,7 @@ pub fn shim_steps() -> &'static str {
 }
 
 pub const PANEL_IMAGE: &str = "OS Image";
-pub const PANEL_FIRMWARE: &str = "Detected System Firmware";
+pub const PANEL_FIRMWARE: &str = "UEFI Firmware";
 pub const PANEL_REQUIRED: &str = "Required";
 pub const SETUP_OS: &str = "OS setup";
 pub const SETUP_DISK: &str = "Disk setup";
@@ -411,7 +436,7 @@ pub const FIRMWARE_SETUP: &str = "off (setup mode)";
 pub const FIRMWARE_UNREADABLE: &str = "state unreadable";
 pub const PLATFORM_KEY: &str = "platform key";
 pub const PLATFORM_KEY_SETUP: &str = "none (setup mode)";
-pub const PLATFORM_KEY_PRESENT: &str = "an existing platform key is present";
+pub const PLATFORM_KEY_PRESENT: &str = "existing";
 pub const PLATFORM_KEY_OWNER: &str = "the owner key";
 pub const PLATFORM_KEY_UNKNOWN: &str = "could not be read";
 pub const UKI_NEEDS_UEFI: &str = "this image needs a UEFI boot, and none was found";

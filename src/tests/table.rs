@@ -15,25 +15,213 @@ fn the_table_reader_takes_the_sectors_sfdisk_reports() {
 }
 
 #[test]
-fn appendable_room_is_the_tail_and_never_a_hole() {
+fn the_free_regions_are_the_spans_the_surviving_partitions_leave() {
     let table = super::table_of(MEASURED_DUMP);
-    assert_eq!(table.appendable(&[]), 409566 + 1 - 145408);
-    let without = vec!["/dev/vda2".to_string()];
-    assert_eq!(table.appendable(&without), 409566 + 1 - 124928);
-    let middle = vec!["/dev/vda1".to_string()];
-    assert_eq!(table.appendable(&middle), table.appendable(&[]));
+    let spans = |deletes: &[&str]| -> Vec<(u64, u64)> {
+        table
+            .regions(&deletes.iter().map(|at| at.to_string()).collect::<Vec<_>>())
+            .into_iter()
+            .map(|region| (region.start, region.sectors))
+            .collect()
+    };
+    assert_eq!(spans(&[]), [(43008, 40960), (145408, 264159)]);
+    assert_eq!(spans(&["/dev/vda2"]), [(43008, 40960), (124928, 284639)]);
+    assert_eq!(spans(&["/dev/vda1"]), [(2048, 81920), (145408, 264159)]);
     let all: Vec<String> = table.slots.iter().map(|slot| slot.node.clone()).collect();
-    assert_eq!(table.appendable(&all), 409566 + 1 - 2048);
+    let all: Vec<&str> = all.iter().map(String::as_str).collect();
+    assert_eq!(spans(&all), [(2048, 407519)]);
 }
 
 #[test]
-fn appendable_gb_counts_in_decimal_gb() {
-    let table = super::table_of(MEASURED_DUMP);
-    assert_eq!(
-        table.appendable_gb(&[]),
-        (409566 + 1 - 145408) * 512 / 1_000_000_000
+fn a_create_takes_the_lowest_region_with_room_for_it() {
+    let sector = 512u64;
+    let gb = 1_000_000_000 / sector;
+    let table = DiskTable {
+        first: 2048,
+        last: 100 * gb,
+        sector,
+        label: "gpt".to_string(),
+        slots: vec![
+            Slot {
+                node: "/dev/vda1".to_string(),
+                number: 1,
+                start: 2048,
+                sectors: 10 * gb,
+            },
+            Slot {
+                node: "/dev/vda2".to_string(),
+                number: 2,
+                start: 10 * gb + 2048,
+                sectors: 20 * gb,
+            },
+            Slot {
+                node: "/dev/vda3".to_string(),
+                number: 3,
+                start: 30 * gb + 2048,
+                sectors: 10 * gb,
+            },
+        ],
+    };
+    let create = |gb: u64, offset: u64| Created {
+        gb,
+        offset,
+        target: "/".to_string(),
+        fstype: "btrfs".to_string(),
+        ..Default::default()
+    };
+    let deletes = vec!["/dev/vda2".to_string()];
+    let (starts, _) = place_creates(&table, &deletes, &[create(5, 0), create(50, 0)])
+        .expect("both creates fit the disk");
+    let hole = table.aligned(&Region {
+        start: 10 * gb + 2048,
+        sectors: 20 * gb,
+    });
+    let tail = table.aligned(&Region {
+        start: 40 * gb + 2048,
+        sectors: 60 * gb - 2047,
+    });
+    assert_eq!(starts, [hole.start, tail.start]);
+    let (starts, _) = place_creates(&table, &deletes, &[create(5, 3)]).expect("a 5 GB create");
+    assert_eq!(starts, [hole.start + 3 * gb]);
+    let room = create_rooms(&table, &[], &[]);
+    assert_eq!(room.largest, 59);
+    assert_eq!(place_creates(&table, &[], &[create(60, 0)]).err(), Some(59));
+}
+
+#[test]
+fn the_create_window_opens_on_the_room_the_plan_leaves() {
+    let sector = 512u64;
+    let gb = 1_000_000_000 / sector;
+    let table = DiskTable {
+        first: 2048,
+        last: 100 * gb,
+        sector,
+        label: "gpt".to_string(),
+        slots: vec![
+            Slot {
+                node: "/dev/vda1".to_string(),
+                number: 1,
+                start: 2048,
+                sectors: 10 * gb,
+            },
+            Slot {
+                node: "/dev/vda2".to_string(),
+                number: 2,
+                start: 10 * gb + 2048,
+                sectors: 20 * gb,
+            },
+            Slot {
+                node: "/dev/vda3".to_string(),
+                number: 3,
+                start: 30 * gb + 2048,
+                sectors: 10 * gb,
+            },
+        ],
+    };
+    assert_eq!(create_rooms(&table, &[], &[]).first, 59);
+    let deletes = vec!["/dev/vda2".to_string()];
+    let rooms = create_rooms(&table, &deletes, &[]);
+    assert_eq!(rooms.first, 19, "the freed hole is the default size");
+    assert_eq!(rooms.largest, 59, "the tail is still the largest region");
+    let held = [Created {
+        gb: 5,
+        ..Default::default()
+    }];
+    assert_eq!(create_rooms(&table, &deletes, &held).first, 14);
+    let too_big = [Created {
+        gb: 95,
+        ..Default::default()
+    }];
+    let rooms = create_rooms(&table, &deletes, &too_big);
+    assert_eq!(rooms.first, 0);
+    assert!(rooms.largest < 95, "{}", rooms.largest);
+}
+
+#[test]
+fn the_create_size_opens_on_the_first_region_not_the_smallest() {
+    let sector = 512u64;
+    let gb = 1_000_000_000 / sector;
+    let table = DiskTable {
+        first: 2048,
+        last: 100 * gb,
+        sector,
+        label: "gpt".to_string(),
+        slots: vec![
+            Slot {
+                node: "/dev/vda1".to_string(),
+                number: 1,
+                start: 2048,
+                sectors: 30 * gb,
+            },
+            Slot {
+                node: "/dev/vda2".to_string(),
+                number: 2,
+                start: 30 * gb + 2048,
+                sectors: 8 * gb,
+            },
+            Slot {
+                node: "/dev/vda3".to_string(),
+                number: 3,
+                start: 60 * gb,
+                sectors: 30 * gb,
+            },
+        ],
+    };
+    let rooms = create_rooms(&table, &[], &[]);
+    assert_eq!(rooms.first, 21, "the first region in sector order");
+    assert_eq!(rooms.largest, 21);
+    let placed = place_creates(
+        &table,
+        &[],
+        &[Created {
+            gb: rooms.first,
+            ..Default::default()
+        }],
     );
-    assert_eq!(table.appendable_gb(&[]), 0);
+    let (start, _) = placed.expect("the default size fits the first region");
+    let first = table.aligned(&Region {
+        start: 38 * gb + 2048,
+        sectors: 22 * gb - 2048,
+    });
+    assert_eq!(start, [first.start]);
+}
+
+#[test]
+fn a_region_is_trimmed_to_the_alignment_sfdisk_writes() {
+    let table = super::table_of(MEASURED_DUMP);
+    let region = super::Region {
+        start: 43008,
+        sectors: 40960,
+    };
+    assert_eq!(
+        table.aligned(&region),
+        super::Region {
+            start: 43008,
+            sectors: 40960
+        }
+    );
+    let off = super::Region {
+        start: 43009,
+        sectors: 40958,
+    };
+    assert_eq!(
+        table.aligned(&off),
+        super::Region {
+            start: 45056,
+            sectors: 36864
+        }
+    );
+    assert_eq!(
+        table.aligned(&super::Region {
+            start: 43009,
+            sectors: 100
+        }),
+        super::Region {
+            start: 45056,
+            sectors: 0
+        }
+    );
+    assert_eq!(table.placeable_gb(&region), 40960 * 512 / 1_000_000_000);
 }
 
 #[test]
@@ -110,8 +298,14 @@ fn a_delete_matches_its_slot_when_lsblk_and_sfdisk_name_it_differently() {
     let deletes = vec!["/dev/sda3".to_string()];
     assert_eq!(table.surviving(&deletes), [1, 2]);
     let highest = vec!["/dev/sda2".to_string()];
-    assert_eq!(table.appendable(&highest), 409566 + 1 - 43008);
-    assert_ne!(table.appendable(&highest), table.appendable(&[]));
+    assert_eq!(
+        table.regions(&highest),
+        [super::Region {
+            start: 43008,
+            sectors: 366559
+        }]
+    );
+    assert_ne!(table.regions(&highest), table.regions(&[]));
     assert_eq!(
         super::created_devices("/dev/disk/by-id/ata-X", &table.surviving(&deletes), 1),
         ["/dev/disk/by-id/ata-X-part3"]
@@ -122,7 +316,13 @@ fn a_delete_matches_its_slot_when_lsblk_and_sfdisk_name_it_differently() {
         "/dev/sda3".to_string(),
     ];
     assert_eq!(table.surviving(&all), [] as [usize; 0]);
-    assert_eq!(table.appendable(&all), 409566 + 1 - 2048);
+    assert_eq!(
+        table.regions(&all),
+        [super::Region {
+            start: 2048,
+            sectors: 407519
+        }]
+    );
 }
 
 #[test]
@@ -200,6 +400,7 @@ size=20M, name=two
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -242,7 +443,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
         .and_then(|file| file.set_len(8 * 1024 * 1024 * 1024))
         .expect("a backing file");
     let disk = image.to_string_lossy().to_string();
-    let script = "label: gpt\nsize=20M, name=one\nsize=20M, name=two\nsize=20M, name=three\n";
+    let script = "label: gpt\nsize=2G, name=one\nsize=2G, name=two\nsize=2G, name=three\n";
     let mut child = Command::new("sfdisk")
         .args(["-q", &disk])
         .stdin(Stdio::piped())
@@ -259,6 +460,12 @@ fn the_cut_writes_the_table_the_screen_drew() {
     assert!(child.wait().expect("sfdisk").success());
 
     let before = super::disk_table(&disk).expect("the table");
+    let deleted = before
+        .slots
+        .iter()
+        .find(|slot| slot.number == 2)
+        .expect("the middle slot")
+        .clone();
     let layout = CustomLayout {
         disk: disk.clone(),
         deletes: vec![format!("{disk}2")],
@@ -268,12 +475,14 @@ fn the_cut_writes_the_table_the_screen_drew() {
                 target: "/boot/efi".to_string(),
                 fstype: "fat32".to_string(),
                 device: String::new(),
+                ..Default::default()
             },
             Created {
                 gb: 1,
                 target: "/".to_string(),
                 fstype: "btrfs".to_string(),
                 device: String::new(),
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -310,18 +519,20 @@ fn the_cut_writes_the_table_the_screen_drew() {
         .iter()
         .find(|slot| slot.number == 3)
         .expect("slot 3");
-    for number in [2, 4] {
-        let slot = after
-            .slots
-            .iter()
-            .find(|slot| slot.number == number)
-            .expect("a created slot");
-        assert!(
-            slot.start >= three.start + three.sectors,
-            "slot {number} starts at {}, inside or before the surviving table",
-            slot.start
-        );
-    }
+    assert_eq!(
+        two.start, deleted.start,
+        "the first create took the deleted slot's own sector"
+    );
+    let four = after
+        .slots
+        .iter()
+        .find(|slot| slot.number == 4)
+        .expect("slot 4");
+    assert!(four.start >= two.start + two.sectors, "the creates overlap");
+    assert!(
+        four.start + four.sectors <= three.start,
+        "the creates ran past the hole into the surviving partition"
+    );
     let dump = Command::new("sfdisk")
         .args(["--dump", &disk])
         .output()
@@ -340,7 +551,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
 }
 
 #[test]
-fn a_partition_sfdisk_had_to_shrink_stops_the_install() {
+fn a_create_bigger_than_the_free_region_stops_the_install() {
     let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
         return;
     };
@@ -367,6 +578,7 @@ fn a_partition_sfdisk_had_to_shrink_stops_the_install() {
         .write_all(b"label: gpt\n")
         .expect("an empty table");
     assert!(child.wait().expect("sfdisk").success());
+    let before = super::disk_table(&disk).expect("the table");
     let layout = CustomLayout {
         disk: disk.clone(),
         creates: vec![Created {
@@ -374,11 +586,83 @@ fn a_partition_sfdisk_had_to_shrink_stops_the_install() {
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
     let err = super::apply_cuts(&layout).expect_err("a 1 GB partition on a 200 MiB disk");
-    assert!(err.contains("did not say so"), "{err}");
+    assert!(err.contains("no room"), "{err}");
+    assert_eq!(
+        super::disk_table(&disk).expect("the table"),
+        before,
+        "the refusal left the disk untouched"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_cut_writes_the_planned_names() {
+    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
+        return;
+    };
+    if !sfdisk.status.success() {
+        return;
+    }
+    let root = scratch("cut-names");
+    let image = root.join("disk.img");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(8 * 1024 * 1024 * 1024))
+        .expect("a backing file");
+    let disk = image.to_string_lossy().to_string();
+    let script = "label: gpt\nsize=1G, name=one\nsize=1G, name=two\n";
+    let mut child = Command::new("sfdisk")
+        .args(["-q", &disk])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("sfdisk");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("the starting table");
+    assert!(child.wait().expect("sfdisk").success());
+
+    let layout = CustomLayout {
+        disk: disk.clone(),
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            label: "root".to_string(),
+            device: String::new(),
+            ..Default::default()
+        }],
+        renames: vec![Rename {
+            partition: format!("{disk}1"),
+            label: "renamed".to_string(),
+        }],
+        ..Default::default()
+    };
+    let cut = super::apply_cuts(&layout).expect("the cut");
+    assert_eq!(cut, [3]);
+    let dump = Command::new("sfdisk")
+        .args(["--dump", &disk])
+        .output()
+        .expect("a dump");
+    let dump = String::from_utf8_lossy(&dump.stdout);
+    for (number, label) in [(1, "renamed"), (3, "root")] {
+        let line = dump
+            .lines()
+            .find(|line| line.starts_with(&format!("{disk}{number} ")))
+            .unwrap_or_else(|| panic!("no line for slot {number} in:\n{dump}"));
+        assert!(
+            line.contains(&format!("name=\"{label}\"")),
+            "slot {number}: {line}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -392,6 +676,7 @@ fn a_created_slot_missing_from_the_read_back_table_stops_the_install() {
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -409,6 +694,7 @@ fn a_created_slot_is_checked_by_number_when_the_node_name_differs() {
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -433,7 +719,9 @@ fn a_created_slot_is_checked_by_number_when_the_node_name_differs() {
         }],
         ..after.clone()
     };
-    assert!(super::check_created_slots(&layout, &[2], &short).is_err());
+    let err = super::check_created_slots(&layout, &[2], &short)
+        .expect_err("a slot sfdisk shrank must stop the install");
+    assert!(err.contains("did not say so"), "{err}");
 }
 
 #[test]
@@ -451,21 +739,37 @@ fn a_disk_with_no_gpt_span_still_has_room() {
         slots: dos.slots.clone(),
     };
     assert_eq!(
-        filled.wrong_label_for(&[], 1).as_deref(),
+        filled.wrong_label_for(&[], 1, 0).as_deref(),
         Some(copy::custom_not_gpt("dos").as_str())
     );
-    assert!(filled.wrong_label_for(&[], 0).is_none());
+    assert_eq!(
+        filled.wrong_label_for(&[], 0, 1).as_deref(),
+        Some(copy::custom_not_gpt("dos").as_str())
+    );
+    assert!(filled.wrong_label_for(&[], 0, 0).is_none());
     let all = vec!["/dev/vda1".to_string()];
-    assert!(filled.wrong_label_for(&all, 1).is_none());
-    assert_eq!(filled.appendable(&all), 409566 + 1 - 2048);
+    assert!(filled.wrong_label_for(&all, 1, 1).is_none());
+    assert_eq!(
+        filled.regions(&all),
+        [super::Region {
+            start: 2048,
+            sectors: 407519
+        }]
+    );
     let blank = DiskTable {
         first: 2048,
         last: 409566,
         sector: 512,
         ..Default::default()
     };
-    assert!(blank.wrong_label_for(&[], 1).is_none());
-    assert_eq!(blank.appendable(&[]), 409566 + 1 - 2048);
+    assert!(blank.wrong_label_for(&[], 1, 0).is_none());
+    assert_eq!(
+        blank.regions(&[]),
+        [super::Region {
+            start: 2048,
+            sectors: 407519
+        }]
+    );
 }
 
 #[test]
@@ -502,11 +806,15 @@ fn a_plan_that_outgrew_its_room_is_refused_before_the_cut() {
                 target: target.to_string(),
                 fstype: fstype.to_string(),
                 device: String::new(),
+                ..Default::default()
             })
             .collect(),
         ..Default::default()
     };
-    assert_eq!(table.appendable_gb(&["/dev/vda2".to_string()]), 89);
+    let freed = vec!["/dev/vda2".to_string()];
+    let rooms = create_rooms(&table, &freed, &[]);
+    assert_eq!(rooms.first, 89, "the create window's size default");
+    assert_eq!(rooms.largest, 89);
     let ok = plan(
         vec!["/dev/vda2"],
         vec![(2, "/boot/efi", "fat32"), (87, "/", "btrfs")],
@@ -518,7 +826,7 @@ fn a_plan_that_outgrew_its_room_is_refused_before_the_cut() {
     );
     assert_eq!(
         layout_short_of(&over, false, Some(&table), 0).as_deref(),
-        Some(copy::custom_too_big(89).as_str())
+        Some(copy::custom_too_big(87).as_str())
     );
     let mut restored = ok.clone();
     restored.deletes.clear();
@@ -548,12 +856,14 @@ fn a_blank_and_a_dos_disk_are_cut_as_gpt() {
             target: "/boot/efi".to_string(),
             fstype: "fat32".to_string(),
             device: String::new(),
+            ..Default::default()
         },
         Created {
             gb: 1,
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         },
     ];
     for (name, start, deletes) in [
@@ -623,14 +933,15 @@ fn the_derived_span_counts_in_the_disks_own_sectors() {
     assert_eq!(super::disk_sectors(&disk, 4096), bytes / 4096);
     assert_eq!(super::disk_sectors(&disk, 0), bytes / 512);
     let room = |sector: u64| {
-        DiskTable {
+        let table = DiskTable {
             first: 2048,
             last: super::disk_sectors(&disk, sector).saturating_sub(34),
             sector,
             label: String::new(),
             slots: Vec::new(),
-        }
-        .appendable_gb(&[])
+        };
+        let region = table.regions(&[]);
+        table.placeable_gb(&region[0])
     };
     assert_eq!(room(512), room(4096));
     assert_eq!(room(512), 8);
@@ -672,6 +983,7 @@ fn a_cut_whose_node_never_appears_stops_the_install() {
             target: "/".to_string(),
             fstype: "btrfs".to_string(),
             device: String::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -685,4 +997,55 @@ fn a_cut_whose_node_never_appears_stops_the_install() {
 fn a_layout_that_cuts_nothing_writes_no_partition_table() {
     let mut layout = CustomLayout::empty("/dev/definitely-not-a-disk");
     assert!(super::cut_partitions(&mut layout).is_ok());
+}
+
+fn three_slots() -> DiskTable {
+    let sector = 512u64;
+    let gb = 1_000_000_000 / sector;
+    let slot = |number: usize, start: u64, sectors: u64| Slot {
+        node: format!("/dev/vda{number}"),
+        number,
+        start,
+        sectors,
+    };
+    DiskTable {
+        first: 2048,
+        last: 100 * gb,
+        sector,
+        label: "gpt".to_string(),
+        slots: vec![
+            slot(1, 2048, 10 * gb),
+            slot(2, 10 * gb + 2048, 20 * gb),
+            slot(3, 30 * gb + 2048, 10 * gb),
+        ],
+    }
+}
+
+fn names() -> Vec<(usize, String)> {
+    vec![(1, "efi".to_string()), (3, "vda3".to_string())]
+}
+
+#[test]
+fn a_freed_hole_is_bounded_by_the_partitions_beside_it() {
+    let deletes = vec!["/dev/vda2".to_string()];
+    let holes = create_holes(&three_slots(), &deletes, &[], &names());
+    let sides: Vec<(Option<&str>, Option<&str>)> = holes
+        .iter()
+        .map(|hole| (hole.before.as_deref(), hole.after.as_deref()))
+        .collect();
+    assert_eq!(sides, [(Some("efi"), Some("vda3")), (Some("vda3"), None)]);
+}
+
+#[test]
+fn a_planned_create_bounds_the_region_it_leaves() {
+    let deletes = vec!["/dev/vda2".to_string()];
+    let held = [Created {
+        gb: 5,
+        ..Default::default()
+    }];
+    let mut names = names();
+    names.push((2, "new".to_string()));
+    let holes = create_holes(&three_slots(), &deletes, &held, &names);
+    assert_eq!(holes[0].before.as_deref(), Some("new"));
+    assert_eq!(holes[0].after.as_deref(), Some("vda3"));
 }

@@ -10,6 +10,9 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     if let Some(layout) = answers.layout.as_mut() {
         cut_partitions(layout)?;
     }
+    if let Some(layout) = answers.layout.as_ref() {
+        esp::remove(layout)?;
+    }
     let _opened = open_volumes(answers.layout.as_ref())?;
     let staged = stage(&complete(&payload.recipe, answers)?)?;
     let (mut log, at) = open_log(payload);

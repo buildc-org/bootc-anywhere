@@ -14,7 +14,7 @@ fn a_planned_removal_offers_only_the_answer_that_undoes_it() {
     };
     let mut layout = CustomLayout::empty("/dev/vda");
     for partition in [&plain, &container] {
-        let (items, actions) = super::partition_menu(partition, Some(&layout));
+        let (items, actions) = super::partition_menu(partition, Some(&layout), true);
         assert!(
             items.iter().any(|item| item.label == copy::DELETE_PART),
             "{:?}",
@@ -23,11 +23,16 @@ fn a_planned_removal_offers_only_the_answer_that_undoes_it() {
         assert!(matches!(actions.last(), Some(PartAction::Delete)));
     }
     layout.deletes = vec!["/dev/vda1".to_string()];
-    let (items, actions) = super::partition_menu(&plain, Some(&layout));
+    let (items, actions) = super::partition_menu(&plain, Some(&layout), true);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].label, copy::RESET_CHANGES);
     assert!(matches!(actions[0], PartAction::Reset));
-    assert!(super::partition_menu(&container, Some(&layout)).0.len() > 1);
+    assert!(
+        super::partition_menu(&container, Some(&layout), true)
+            .0
+            .len()
+            > 1
+    );
 }
 
 #[test]
@@ -43,17 +48,23 @@ fn the_disk_menu_offers_clearing_only_when_there_is_something_to_clear() {
 
 #[test]
 fn a_created_size_is_refused_against_the_room_that_is_actually_there() {
-    assert_eq!(super::size_short_of("50", 100), None);
-    assert_eq!(super::size_short_of("100", 100), None);
+    assert_eq!(super::create_short_of("0", "50", 100), None);
+    assert_eq!(super::create_short_of("0", "100", 100), None);
+    assert_eq!(super::create_short_of("10", "90", 100), None);
     assert_eq!(
-        super::size_short_of("101", 100).as_deref(),
+        super::create_short_of("10", "91", 100).as_deref(),
         Some(copy::custom_too_big(100).as_str())
     );
-    assert_eq!(super::size_short_of("", 100).as_deref(), Some(""));
     assert_eq!(
-        super::size_short_of("0", 100).as_deref(),
+        super::create_short_of("0", "101", 100).as_deref(),
         Some(copy::custom_too_big(100).as_str())
     );
+    assert_eq!(super::create_short_of("0", "", 100).as_deref(), Some(""));
+    assert_eq!(
+        super::create_short_of("0", "0", 100).as_deref(),
+        Some(copy::custom_too_big(100).as_str())
+    );
+    assert_eq!(super::create_short_of("", "50", 100), None);
     assert!(copy::custom_too_big(0).contains("no room"));
 }
 
@@ -67,12 +78,14 @@ fn a_created_root_below_the_image_reserve_is_refused() {
                 target: "/boot/efi".to_string(),
                 fstype: "fat32".to_string(),
                 device: String::new(),
+                ..Default::default()
             },
             Created {
                 gb: 1,
                 target: "/".to_string(),
                 fstype: "btrfs".to_string(),
                 device: String::new(),
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -235,13 +248,11 @@ fn the_layout_table_reads_every_answer_back_on_its_row() {
         }],
         ..Default::default()
     };
-    let disks = vec![("/dev/vda".to_string(), "64G".to_string())];
-    let parts = vec![("/dev/vda".to_string(), rows)];
+    let scan = scan_of(&[("/dev/vda", "64G")], &[("/dev/vda", rows)]);
     let table = layout_table(
-        &disks,
+        &scan,
         "/dev/vda",
         Some(&layout),
-        &parts,
         &a_payload(),
         "",
         false,
@@ -288,10 +299,9 @@ fn the_layout_table_reads_every_answer_back_on_its_row() {
         ..layout.clone()
     };
     let kept = layout_table(
-        &disks,
+        &scan,
         "/dev/vda",
         Some(&untouched),
-        &parts,
         &a_payload(),
         "",
         false,
@@ -301,16 +311,7 @@ fn the_layout_table_reads_every_answer_back_on_its_row() {
     assert!(!kept.rows[1][2].answered());
     assert!(!kept.rows[1][3].answered());
     assert_eq!(kept.rows[1][5].text(), "/boot/efi");
-    let automatic = layout_table(
-        &disks,
-        "/dev/vda",
-        None,
-        &[],
-        &a_payload(),
-        "",
-        false,
-        false,
-    );
+    let automatic = layout_table(&scan, "/dev/vda", None, &a_payload(), "", false, false);
     assert_eq!(automatic.rows[0][0].text(), "◉ /dev/vda");
     assert!(automatic.rows[0][0].answered());
     assert_eq!(automatic.rows.len(), 4, "esp, /boot, root");
@@ -346,7 +347,11 @@ fn the_automatic_plan_computes_the_sizes_the_screen_shows() {
         .collect();
     assert_eq!(
         said,
-        [("esp", "2.0 GB"), ("luks", "66.0 GB"), ("root", "66.0 GB")]
+        [
+            ("EFI-SYSTEM", "2.0 GB"),
+            ("root (LUKS)", "66.0 GB"),
+            ("root", "66.0 GB"),
+        ]
     );
 }
 
@@ -369,10 +374,10 @@ fn a_separate_home_is_cut_out_of_the_container() {
     assert_eq!(
         said,
         [
-            ("esp", "2.0 GB"),
-            ("luks", "66.0 GB"),
+            ("EFI-SYSTEM", "2.0 GB"),
+            ("root (LUKS)", "66.0 GB"),
             ("root", "46.0 GB"),
-            ("home", "20.0 GB"),
+            ("var", "20.0 GB"),
         ]
     );
 }
@@ -385,12 +390,12 @@ fn a_size_without_a_separate_home_is_not_a_home_partition() {
     };
     let plan = automatic_rows(&payload, "20", Some(68), false, false);
     assert!(
-        plan.iter().all(|(name, ..)| !name.contains("home")),
+        plan.iter().all(|(name, ..)| !name.contains("var")),
         "{plan:?}"
     );
     let sized = automatic_rows(&payload, "20", Some(68), true, false);
     assert!(
-        sized.iter().any(|(name, ..)| name.contains("home")),
+        sized.iter().any(|(name, ..)| name.contains("var")),
         "{sized:?}"
     );
 }
@@ -405,25 +410,24 @@ fn only_the_chosen_disks_partitions_can_be_answered() {
         parttype: String::new(),
         uuid: String::new(),
     };
-    let disks = vec![
-        ("/dev/sda".to_string(), "16 GB".to_string()),
-        ("/dev/vda".to_string(), "64 GB".to_string()),
-    ];
-    let parts = vec![
-        ("/dev/sda".to_string(), vec![partition("/dev/sda1", "vfat")]),
-        (
-            "/dev/vda".to_string(),
-            vec![
-                partition("/dev/vda1", "vfat"),
-                partition("/dev/vda2", "ext4"),
-            ],
-        ),
-    ];
-    let on_vda = layout_table(
+    let disks = [("/dev/sda", "16 GB"), ("/dev/vda", "64 GB")];
+    let scan = scan_of(
         &disks,
+        &[
+            ("/dev/sda", vec![partition("/dev/sda1", "vfat")]),
+            (
+                "/dev/vda",
+                vec![
+                    partition("/dev/vda1", "vfat"),
+                    partition("/dev/vda2", "ext4"),
+                ],
+            ),
+        ],
+    );
+    let on_vda = layout_table(
+        &scan,
         "/dev/vda",
         Some(&CustomLayout::empty("/dev/vda")),
-        &parts,
         &a_payload(),
         "",
         false,
@@ -435,10 +439,9 @@ fn only_the_chosen_disks_partitions_can_be_answered() {
     assert!(matches!(on_vda.kinds[3], RowKind::Part { index: 0 }));
     assert!(matches!(on_vda.kinds[4], RowKind::Part { index: 1 }));
     let on_sda = layout_table(
-        &disks,
+        &scan,
         "/dev/sda",
         Some(&CustomLayout::empty("/dev/sda")),
-        &parts,
         &a_payload(),
         "",
         false,
@@ -448,6 +451,167 @@ fn only_the_chosen_disks_partitions_can_be_answered() {
     assert_eq!(on_sda.selectable, [true, true, true, false, false]);
     assert!(matches!(on_sda.kinds[1], RowKind::Part { index: 0 }));
     assert!(matches!(on_sda.kinds[3], RowKind::Part { index: 0 }));
+}
+
+#[test]
+fn every_disk_shows_what_it_holds_before_it_is_chosen() {
+    let windows = Partition {
+        device: "/dev/sda1".to_string(),
+        size: "100G".to_string(),
+        fstype: "ntfs".to_string(),
+        label: String::new(),
+        parttype: String::new(),
+        uuid: String::new(),
+    };
+    let esp = Partition {
+        device: "/dev/vda1".to_string(),
+        fstype: "vfat".to_string(),
+        ..windows.clone()
+    };
+    let scan = Scan {
+        unread: Vec::new(),
+        disks: vec![
+            DiskScan {
+                device: "/dev/sda".to_string(),
+                detail: "256 GB".to_string(),
+                partitions: vec![windows],
+                carries: true,
+                table: Ok(DiskTable::default()),
+                labels: vec![("/dev/sda1".to_string(), vec![label("Windows")])],
+                keys: Discovered::default(),
+            },
+            DiskScan {
+                device: "/dev/vda".to_string(),
+                detail: "64 GB".to_string(),
+                partitions: vec![esp],
+                carries: true,
+                table: Ok(DiskTable::default()),
+                labels: vec![("/dev/vda1".to_string(), vec![label("fedora")])],
+                keys: Discovered::default(),
+            },
+        ],
+    };
+    let table = layout_table(&scan, "/dev/vda", None, &a_payload(), "", false, false);
+    let said = |row: usize, column: usize| table.rows[row][column].text().to_string();
+    assert_eq!(table.rows.len(), 7);
+    assert_eq!(
+        table.selectable,
+        [true, false, false, true, false, false, false]
+    );
+    assert_eq!(said(1, 0), "\u{2514}\u{2500} /dev/sda1");
+    assert_eq!(said(2, 0), "   \u{2514}\u{2500} Windows");
+    assert!(!table.rows[2][0].answered(), "a carried system reads grey");
+    assert!(matches!(table.kinds[2], RowKind::Preview));
+    assert_eq!(said(4, 4), "efi", "the chosen disk draws its plan");
+    assert_eq!(said(4, 0), "\u{251c}\u{2500} EFI-SYSTEM");
+    let table = layout_table(
+        &scan,
+        "/dev/vda",
+        Some(&CustomLayout::empty("/dev/vda")),
+        &a_payload(),
+        "",
+        false,
+        false,
+    );
+    assert_eq!(table.selectable, [true, false, false, true, true, false]);
+    assert_eq!(table.rows.len(), 6);
+    assert_eq!(table.rows[4][0].text(), "\u{2514}\u{2500} /dev/vda1");
+    assert_eq!(table.rows[5][0].text(), "   \u{2514}\u{2500} fedora");
+}
+
+#[test]
+fn the_plan_draws_the_entries_the_image_writes_on_its_esp() {
+    let scan = Scan {
+        unread: Vec::new(),
+        disks: vec![DiskScan {
+            device: "/dev/vda".to_string(),
+            detail: "64 GB".to_string(),
+            partitions: vec![part("/dev/vda1", "vfat"), part("/dev/vda2", "ext4")],
+            carries: false,
+            table: Ok(DiskTable::default()),
+            labels: vec![(
+                "/dev/vda1".to_string(),
+                vec![
+                    Label {
+                        name: "fedora".to_string(),
+                        link: "/dev/vda2".to_string(),
+                    },
+                    Label {
+                        name: "Microsoft".to_string(),
+                        link: "/dev/sda2".to_string(),
+                    },
+                ],
+            )],
+            keys: Discovered::default(),
+        }],
+    };
+    let mut held = CustomLayout::empty("/dev/vda");
+    held.mounts.push(CustomMount {
+        partition: "/dev/vda1".to_string(),
+        target: "/boot/efi".to_string(),
+        fstype: "unformatted".to_string(),
+        passphrase: String::new(),
+    });
+    held.mounts.push(CustomMount {
+        partition: "/dev/vda2".to_string(),
+        target: "/boot".to_string(),
+        fstype: "ext4".to_string(),
+        passphrase: String::new(),
+    });
+    let payload = a_payload_writing(&["fedora"]);
+    let table = layout_table(&scan, "/dev/vda", Some(&held), &payload, "", false, false);
+    let said: Vec<(String, bool)> = table
+        .rows
+        .iter()
+        .map(|row| (row[0].text().to_string(), row[0].answered()))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            ("\u{25c9} /dev/vda".to_string(), true),
+            ("\u{251c}\u{2500} /dev/vda1".to_string(), true),
+            ("   \u{251c}\u{2500} Microsoft".to_string(), false),
+            ("   \u{2514}\u{2500} fedora".to_string(), true),
+            ("\u{2514}\u{2500} /dev/vda2".to_string(), true),
+        ]
+    );
+    held.mounts[0].fstype = "vfat".to_string();
+    let table = layout_table(&scan, "/dev/vda", Some(&held), &payload, "", false, false);
+    let systems: Vec<(&str, bool)> = table.rows[2..3]
+        .iter()
+        .map(|row| (row[0].text(), row[0].answered()))
+        .collect();
+    assert_eq!(systems, [("   \u{2514}\u{2500} fedora", true)]);
+}
+
+#[test]
+fn a_partition_the_plan_formats_vfat_takes_the_esp_role() {
+    let scan = Scan {
+        unread: Vec::new(),
+        disks: vec![DiskScan {
+            device: "/dev/vda".to_string(),
+            detail: "64 GB".to_string(),
+            partitions: vec![part("/dev/vda1", "ext4")],
+            carries: false,
+            table: Ok(DiskTable::default()),
+            labels: Vec::new(),
+            keys: Discovered::default(),
+        }],
+    };
+    let mut held = CustomLayout::empty("/dev/vda");
+    held.mounts.push(CustomMount {
+        partition: "/dev/vda1".to_string(),
+        target: "/boot/efi".to_string(),
+        fstype: "vfat".to_string(),
+        passphrase: String::new(),
+    });
+    let payload = a_payload_writing(&["fedora"]);
+    let table = layout_table(&scan, "/dev/vda", Some(&held), &payload, "", false, false);
+    let systems: Vec<(&str, bool)> = table.rows[2..]
+        .iter()
+        .map(|row| (row[0].text(), row[0].answered()))
+        .collect();
+    assert_eq!(systems, [("   \u{2514}\u{2500} fedora", true)]);
 }
 
 #[test]
@@ -568,7 +732,135 @@ fn the_size_window_submits_on_the_key_its_field_answers_with() {
     assert!(super::submitted(Filled::Changed(0)));
     assert!(super::submitted(Filled::Took(0)));
     assert!(!super::submitted(Filled::Left));
-    assert!(super::size_short_of("0", 100).is_some());
-    assert_eq!(super::size_short_of("20", 100), None);
-    assert!(super::size_short_of("", 100).is_some());
+    assert!(super::create_short_of("0", "0", 100).is_some());
+    assert_eq!(super::create_short_of("20", "80", 100), None);
+    assert!(super::create_short_of("20", "81", 100).is_some());
+    assert!(super::create_short_of("0", "", 100).is_some());
+}
+
+#[test]
+fn the_automatic_plan_cells_land_under_their_own_headings() {
+    let payload = Payload {
+        bootloader: "grub2".to_string(),
+        ..a_payload()
+    };
+    let scan = scan_of(&[("/dev/vda", "64G")], &[]);
+    let table = layout_table(&scan, "/dev/vda", None, &payload, "", false, false);
+    assert_eq!(
+        table.rows[1..]
+            .iter()
+            .map(|row| row[4].text())
+            .collect::<Vec<_>>(),
+        ["efi", "linux", "linux"]
+    );
+    for row in 1..table.rows.len() {
+        assert_eq!(
+            table.rows[row][3].text(),
+            "",
+            "the format column holds no plan answer"
+        );
+    }
+}
+
+#[test]
+fn a_planned_partition_is_named_from_its_mount_point() {
+    assert_eq!(rename_default("/boot/efi", ""), "EFI-SYSTEM");
+    assert_eq!(rename_default("/boot", ""), "boot");
+    assert_eq!(rename_default("/", ""), "root");
+    assert_eq!(rename_default("/var", ""), "var");
+    assert_eq!(rename_default("/var/home", ""), "var");
+    assert_eq!(rename_default("/swap", ""), "");
+    assert_eq!(rename_default("/", "mine"), "mine");
+    assert_eq!(mount_name("/boot/efi"), "EFI-SYSTEM");
+}
+
+#[test]
+fn a_renamed_partition_draws_its_new_name() {
+    let partition = |device: &str| Partition {
+        device: device.to_string(),
+        size: "4G".to_string(),
+        fstype: "ext4".to_string(),
+        label: "old".to_string(),
+        ..Default::default()
+    };
+    let scan = scan_of(
+        &[("/dev/vda", "64G")],
+        &[(
+            "/dev/vda",
+            vec![partition("/dev/vda1"), partition("/dev/vda2")],
+        )],
+    );
+    let layout = CustomLayout {
+        disk: "/dev/vda".to_string(),
+        renames: vec![Rename {
+            partition: "/dev/vda2".to_string(),
+            label: "mine".to_string(),
+        }],
+        ..Default::default()
+    };
+    let table = layout_table(
+        &scan,
+        "/dev/vda",
+        Some(&layout),
+        &a_payload(),
+        "",
+        false,
+        false,
+    );
+    assert_eq!(table.rows[1][0].text(), "\u{251c}\u{2500} old (/dev/vda1)");
+    assert!(!table.rows[1][0].answered(), "an unrenamed row stays dim");
+    assert_eq!(table.rows[2][0].text(), "\u{2514}\u{2500} mine (/dev/vda2)");
+    assert!(table.rows[2][0].answered(), "a renamed row reads white");
+}
+
+#[test]
+fn a_planned_partition_offers_rename() {
+    let scan = scan_of(&[("/dev/vda", "64G")], &[]);
+    let layout = CustomLayout {
+        disk: "/dev/vda".to_string(),
+        creates: vec![Created {
+            gb: 10,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let table = layout_table(
+        &scan,
+        "/dev/vda",
+        Some(&layout),
+        &a_payload(),
+        "",
+        false,
+        false,
+    );
+    assert!(matches!(table.kinds[1], RowKind::Created { index: 0 }));
+    assert_eq!(
+        table.actions[1]
+            .iter()
+            .filter(|action| matches!(action, PartAction::Rename))
+            .count(),
+        1
+    );
+    let named = CustomLayout {
+        creates: vec![Created {
+            gb: 10,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            label: "root".to_string(),
+            ..Default::default()
+        }],
+        ..layout.clone()
+    };
+    let table = layout_table(
+        &scan,
+        "/dev/vda",
+        Some(&named),
+        &a_payload(),
+        "",
+        false,
+        false,
+    );
+    assert_eq!(table.rows[1][0].text(), "\u{2514}\u{2500} root (/dev/vda1)");
 }

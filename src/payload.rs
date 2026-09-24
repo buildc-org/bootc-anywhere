@@ -20,9 +20,37 @@ pub struct Payload {
     pub composefs: bool,
     pub(crate) reserve: std::sync::OnceLock<u64>,
     pub luks_initramfs: bool,
+    pub(crate) esp_entries: std::sync::OnceLock<Vec<String>>,
 }
 
+pub(crate) const ESP_LIST: &str = "for d in \"${1:-/usr/lib/efi}\"/*/*/EFI/*/ \"${2:-/boot/EFI}\"/*/; do if [ -d \"$d\" ]; then printf '%s\\n' \"${d%/}\"; fi; done";
+
 impl Payload {
+    pub(crate) fn esp_entries(&self) -> &[String] {
+        self.esp_entries.get_or_init(|| {
+            let out = Command::new("podman")
+                .args([
+                    "run",
+                    "--rm",
+                    "--pull=never",
+                    "--net=none",
+                    "--security-opt",
+                    "label=disable",
+                    "--entrypoint",
+                    "",
+                ])
+                .arg(&self.image)
+                .args(["/bin/sh", "-c", ESP_LIST])
+                .output();
+            match out {
+                Ok(out) if out.status.success() => {
+                    esp::entry_names(&String::from_utf8_lossy(&out.stdout))
+                }
+                _ => Vec::new(),
+            }
+        })
+    }
+
     pub fn reserve_gb(&self) -> u64 {
         *self
             .reserve
@@ -99,6 +127,7 @@ pub fn classify(root: &Path) -> Result<Found, String> {
             ),
             reserve: std::sync::OnceLock::new(),
             luks_initramfs: matches!(json::field(&doc, "luksInitramfs"), Some(Json::Bool(true))),
+            esp_entries: std::sync::OnceLock::new(),
             recipe,
         }));
     }

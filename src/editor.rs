@@ -22,6 +22,7 @@ pub(crate) enum PartAction {
     Delete,
     Clear,
     Create,
+    Rename,
 }
 
 pub(crate) fn effective_fs(partition: &Partition, answer: Option<&Mounted>) -> String {
@@ -41,10 +42,15 @@ pub(crate) fn fits(target: &str, fstype: &str) -> bool {
     }
 }
 
-pub(crate) fn assigns(partition: &Partition, answer: Option<&Mounted>) -> Vec<&'static str> {
+pub(crate) fn assigns(
+    partition: &Partition,
+    answer: Option<&Mounted>,
+    boot: bool,
+) -> Vec<&'static str> {
     let holds = effective_fs(partition, answer);
     copy::mount_points()
         .into_iter()
+        .filter(|target| *target != "/boot" || boot)
         .filter(|target| fits(target, &holds))
         .collect()
 }
@@ -57,6 +63,23 @@ fn assign_children(points: &[&'static str]) -> Vec<&'static str> {
     let mut children = points.to_vec();
     children.push(copy::UNASSIGN);
     children
+}
+
+pub(crate) fn mount_name(target: &str) -> &'static str {
+    match target {
+        "/boot/efi" => "EFI-SYSTEM",
+        "/boot" => "boot",
+        "/" => "root",
+        "/var" | "/var/home" => "var",
+        _ => "",
+    }
+}
+
+pub(crate) fn rename_default(target: &str, label: &str) -> String {
+    match label.is_empty() {
+        true => mount_name(target).to_string(),
+        false => label.to_string(),
+    }
 }
 
 pub(crate) fn place_unassign(held: &mut Option<CustomLayout>, partition: &Partition) {
@@ -199,44 +222,46 @@ impl TableData {
         self.kinds.push(kind);
     }
 
-    pub(crate) fn field(&self, cursor: usize, chosen: bool) -> common::ui::Field {
+    pub(crate) fn field(&self, cursor: usize, chosen: bool, focused: bool) -> common::ui::Field {
         common::ui::Field::table(
             copy::DISK_SELECTION,
             copy::ROW_DISK,
             &copy::layout_headings(),
+            &copy::layout_widths(),
             self.rows.clone(),
             self.selectable.clone(),
             self.menus.clone(),
             cursor,
+            focused,
             chosen,
         )
     }
 }
 
 pub(crate) fn layout_table(
-    disks: &[(String, String)],
+    scan: &Scan,
     disk: &str,
     layout: Option<&CustomLayout>,
-    partitions: &[(String, Vec<Partition>)],
     payload: &Payload,
     var_size: &str,
     home: bool,
     encrypted: bool,
 ) -> TableData {
     let mut table = TableData::default();
-    for (device, detail) in disks {
-        let chosen = device == disk;
-        let (size, rest) = match detail.split_once("  ") {
+    let boot = payload.bootloader != "systemd";
+    for entry in &scan.disks {
+        let chosen = entry.device == disk;
+        let (size, rest) = match entry.detail.split_once("  ") {
             Some((size, rest)) => (size.to_string(), rest),
-            None => (detail.clone(), ""),
+            None => (entry.detail.clone(), ""),
         };
         let model = rest
             .strip_suffix(copy::REMOVABLE)
             .map(str::trim_end)
             .filter(|model| !model.is_empty());
         let name = match model {
-            Some(model) => format!("{model} ({device})"),
-            None => device.clone(),
+            Some(model) => format!("{model} ({})", entry.device),
+            None => entry.device.clone(),
         };
         let radio = match chosen {
             true => "\u{25c9}",
@@ -254,16 +279,17 @@ pub(crate) fn layout_table(
         if chosen {
             row[0] = common::ui::Cell::set(&choice);
         }
-        let here = partitions
-            .iter()
-            .find(|(at, _)| at == device)
-            .map(|(_, parts)| parts.len())
-            .unwrap_or(0);
         let (menus, actions) = match (layout.is_some(), chosen) {
-            (true, true) => disk_menu(here),
+            (true, true) => disk_menu(entry.partitions.len()),
             _ => (Vec::new(), Vec::new()),
         };
-        table.push(row, true, menus, actions, RowKind::Disk(device.clone()));
+        table.push(
+            row,
+            true,
+            menus,
+            actions,
+            RowKind::Disk(entry.device.clone()),
+        );
         match layout {
             None if chosen => {
                 for (name, size, filesystem, kind, mount) in
@@ -274,8 +300,8 @@ pub(crate) fn layout_table(
                             common::ui::Cell::new(&name),
                             common::ui::Cell::new(&size),
                             common::ui::Cell::new(&filesystem),
-                            common::ui::Cell::new(&kind),
                             common::ui::Cell::new(""),
+                            common::ui::Cell::new(&kind),
                             common::ui::Cell::new(&mount),
                         ],
                         false,
@@ -286,36 +312,11 @@ pub(crate) fn layout_table(
                 }
             }
             Some(held) => {
-                let parts = partitions
-                    .iter()
-                    .find(|(at, _)| at == device)
-                    .map(|(_, parts)| parts.as_slice())
-                    .unwrap_or(&[]);
-                let last = match chosen && !held.creates.is_empty() {
-                    true => usize::MAX,
-                    false => parts.len().saturating_sub(1),
-                };
-                for (at, partition) in parts.iter().enumerate() {
-                    let branch = match at == last {
-                        true => "\u{2514}\u{2500} ",
-                        false => "\u{251c}\u{2500} ",
-                    };
-                    let answer = match chosen {
-                        true => held.answer(partition),
-                        false => None,
-                    };
-                    let deleted = chosen && held.deletes.contains(&partition.device);
-                    let cells = partition_cells(partition, answer, branch, deleted);
-                    let (menus, actions) = match chosen {
-                        true => partition_menu(partition, Some(held)),
-                        false => (Vec::new(), Vec::new()),
-                    };
-                    table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
-                }
+                partition_rows(&mut table, entry, chosen.then_some(held), boot, payload);
                 if chosen {
                     let devices = created_devices(
-                        device,
-                        &drawn_slots(parts, &held.deletes),
+                        &entry.device,
+                        &drawn_slots(&entry.partitions, &held.deletes),
                         held.creates.len(),
                     );
                     let last = held.creates.len().saturating_sub(1);
@@ -325,7 +326,7 @@ pub(crate) fn layout_table(
                             false => "\u{251c}\u{2500} ",
                         };
                         let device = devices.get(at).cloned().unwrap_or_default();
-                        let (menus, actions) = created_menu(create);
+                        let (menus, actions) = created_menu(create, boot);
                         table.push(
                             created_cells(create, &device, branch),
                             true,
@@ -336,10 +337,102 @@ pub(crate) fn layout_table(
                     }
                 }
             }
-            None => {}
+            None => partition_rows(&mut table, entry, None, boot, payload),
         }
     }
     table
+}
+
+fn partition_rows(
+    table: &mut TableData,
+    disk: &DiskScan,
+    held: Option<&CustomLayout>,
+    boot: bool,
+    payload: &Payload,
+) {
+    let parts = &disk.partitions;
+    let chosen = held.is_some();
+    let last = match chosen && !held.is_some_and(|held| held.creates.is_empty()) {
+        true => usize::MAX,
+        false => parts.len().saturating_sub(1),
+    };
+    for (at, partition) in parts.iter().enumerate() {
+        let branch = match at == last {
+            true => "\u{2514}\u{2500} ",
+            false => "\u{251c}\u{2500} ",
+        };
+        let answer = held.and_then(|held| held.answer(partition));
+        let carries = effective_fs(partition, answer.as_ref());
+        let deleted = held.is_some_and(|held| held.deletes.contains(&partition.device));
+        let renamed = held.and_then(|held| held.renamed(&partition.device));
+        let cells = partition_cells(partition, answer, branch, deleted, renamed);
+        let (menus, actions) = match held {
+            Some(held) => partition_menu(partition, Some(held), boot),
+            None => (Vec::new(), Vec::new()),
+        };
+        table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
+        let labels: Vec<&Label> = disk
+            .labels
+            .iter()
+            .filter(|(device, _)| device == &partition.device)
+            .flat_map(|(_, labels)| labels)
+            .collect();
+        let shown: Vec<(String, bool)> = match held.filter(|held| {
+            is_fat(&carries)
+                && held
+                    .answer(partition)
+                    .is_some_and(|mounted| mounted.target == "/boot/efi")
+        }) {
+            Some(held) => {
+                let entries = payload.esp_entries();
+                let mut rows: Vec<(String, bool)> = match held.formatted(&partition.device) {
+                    true => Vec::new(),
+                    false => labels
+                        .iter()
+                        .filter(|label| !held.entry_replaced(&label.link))
+                        .filter(|label| {
+                            !entries
+                                .iter()
+                                .any(|entry| entry.eq_ignore_ascii_case(&label.name))
+                        })
+                        .map(|label| (label.name.clone(), false))
+                        .collect(),
+                };
+                rows.extend(entries.iter().map(|entry| (entry.clone(), true)));
+                rows.sort_by(|one, other| one.0.cmp(&other.0));
+                rows
+            }
+            None => labels
+                .iter()
+                .map(|label| (label.name.clone(), false))
+                .collect(),
+        };
+        for (at, (label, written)) in shown.iter().enumerate() {
+            let branch = match at + 1 == shown.len() {
+                true => "   \u{2514}\u{2500} ",
+                false => "   \u{251c}\u{2500} ",
+            };
+            let said = format!("{branch}{label}");
+            let name = match written {
+                true => common::ui::Cell::set(&said),
+                false => common::ui::Cell::new(&said),
+            };
+            table.push(
+                vec![
+                    name,
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                ],
+                false,
+                Vec::new(),
+                Vec::new(),
+                RowKind::Preview,
+            );
+        }
+    }
 }
 
 pub(crate) fn size_gb(text: &str) -> Option<u64> {
@@ -376,19 +469,19 @@ pub(crate) fn automatic_rows(
         None => "the rest".to_string(),
     };
     let mut rows: Vec<(String, String, String, String, String, bool)> = vec![(
-        "esp".to_string(),
+        "EFI-SYSTEM".to_string(),
         copy::size_said("2"),
         "fat32".to_string(),
-        String::new(),
+        "efi".to_string(),
         "/boot/efi".to_string(),
         false,
     )];
     if boot {
         rows.push((
-            "/boot".to_string(),
+            "boot".to_string(),
             copy::size_said("2"),
             "ext4".to_string(),
-            String::new(),
+            "linux".to_string(),
             "/boot".to_string(),
             false,
         ));
@@ -398,27 +491,27 @@ pub(crate) fn automatic_rows(
             "root".to_string(),
             said(root_size),
             filesystem.clone(),
-            String::new(),
+            "linux".to_string(),
             "/".to_string(),
             inside,
         )
     };
     let home = |inside| {
         (
-            "home".to_string(),
+            "var".to_string(),
             match home_size {
                 Some(size) => copy::size_said(&size.to_string()),
                 None => copy::size_said(var_size),
             },
             filesystem.clone(),
-            String::new(),
+            "linux".to_string(),
             "/var/home".to_string(),
             inside,
         )
     };
     if encrypted {
         rows.push((
-            "luks".to_string(),
+            "root (LUKS)".to_string(),
             said(left),
             String::new(),
             "luks".to_string(),
@@ -456,6 +549,7 @@ fn partition_cells(
     answer: Option<Mounted>,
     branch: &str,
     deleted: bool,
+    renamed: Option<&str>,
 ) -> Vec<common::ui::Cell> {
     if deleted {
         let said = match partition.label.is_empty() {
@@ -495,11 +589,13 @@ fn partition_cells(
         Some(mounted) => common::ui::Cell::set(&mounted.target),
         None => common::ui::Cell::new(""),
     };
-    let said = match partition.label.is_empty() {
+    let label = renamed.unwrap_or(&partition.label);
+    let said = match label.is_empty() {
         true => partition.device.clone(),
-        false => format!("{} ({})", partition.label, partition.device),
+        false => format!("{} ({})", label, partition.device),
     };
-    let device = match answer.is_some() {
+    let answered = answer.is_some() || renamed.is_some();
+    let device = match answered {
         true => common::ui::Cell::set(&format!("{branch}{said}")),
         false => common::ui::Cell::new(&format!("{branch}{said}")),
     };
@@ -516,6 +612,7 @@ fn partition_cells(
 pub(crate) fn partition_menu(
     partition: &Partition,
     held: Option<&CustomLayout>,
+    boot: bool,
 ) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     if held.is_some_and(|layout| layout.deletes.contains(&partition.device)) {
         return (
@@ -524,6 +621,7 @@ pub(crate) fn partition_menu(
         );
     }
     let answer = held.and_then(|layout| layout.answer(partition));
+    let renamed = held.is_some_and(|layout| layout.renamed(&partition.device).is_some());
     let opened = held.is_some_and(|layout| {
         layout
             .opens
@@ -556,7 +654,7 @@ pub(crate) fn partition_menu(
             }
         }
     } else {
-        let points = assigns(partition, answer.as_ref());
+        let points = assigns(partition, answer.as_ref(), boot);
         if !points.is_empty() {
             let points = assign_children(&points);
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
@@ -565,7 +663,9 @@ pub(crate) fn partition_menu(
         items.push(common::ui::MenuItem::new(copy::FORMAT_ROW));
         actions.push(PartAction::Format);
     }
-    if answer.is_some() {
+    items.push(common::ui::MenuItem::new(copy::RENAME_PART));
+    actions.push(PartAction::Rename);
+    if answer.is_some() || renamed {
         items.push(common::ui::MenuItem::new(copy::RESET_CHANGES));
         actions.push(PartAction::Reset);
     }
@@ -574,10 +674,11 @@ pub(crate) fn partition_menu(
     (items, actions)
 }
 
-fn created_menu(create: &Created) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
+fn created_menu(create: &Created, boot: bool) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     let points: Vec<&'static str> = copy::mount_points()
         .into_iter()
         .filter(|target| *target != "/swap")
+        .filter(|target| *target != "/boot" || boot)
         .filter(|target| create.fstype.is_empty() || fits(target, &create.fstype))
         .collect();
     let mut items = Vec::new();
@@ -589,6 +690,8 @@ fn created_menu(create: &Created) -> (Vec<common::ui::MenuItem>, Vec<PartAction>
     }
     items.push(common::ui::MenuItem::new(copy::FORMAT_ROW));
     actions.push(PartAction::Format);
+    items.push(common::ui::MenuItem::new(copy::RENAME_PART));
+    actions.push(PartAction::Rename);
     items.push(common::ui::MenuItem::new(copy::DELETE_PART));
     actions.push(PartAction::Delete);
     (items, actions)
@@ -617,8 +720,12 @@ fn created_cells(create: &Created, device: &str, branch: &str) -> Vec<common::ui
         true => common::ui::Cell::new(""),
         false => common::ui::Cell::set(&create.target),
     };
+    let said = match create.label.is_empty() {
+        true => device.to_string(),
+        false => format!("{} ({device})", create.label),
+    };
     vec![
-        common::ui::Cell::set(&format!("{branch}{device}")),
+        common::ui::Cell::set(&format!("{branch}{said}")),
         common::ui::Cell::new(&copy::size_said(&create.gb.to_string())),
         filesystem,
         common::ui::Cell::set(copy::CELL_NEW),
@@ -653,10 +760,6 @@ pub(crate) fn usable_key(key: &Key, encrypted_root: bool) -> bool {
 }
 
 pub(crate) const LINUX_FILESYSTEMS: [&str; 4] = ["ext3", "ext4", "xfs", "btrfs"];
-
-fn is_fat(fstype: &str) -> bool {
-    ["vfat", "fat", "fat32"].contains(&fstype)
-}
 
 pub(crate) fn open_key(
     partition: &str,
@@ -707,27 +810,22 @@ fn ask_key(plain_root: bool) -> Result<Key, String> {
     }
 }
 
-pub(crate) fn confirm_disk(device: &str, disks: &[(String, String)]) -> Result<bool, String> {
-    let said = disks
-        .iter()
-        .find(|(at, _)| at == device)
-        .map(|(_, said)| said.clone())
-        .unwrap_or_default();
-    let (size, model) = match said.split_once("  ") {
+pub(crate) fn confirm_disk(disk: &DiskScan) -> Result<bool, String> {
+    let (size, model) = match disk.detail.split_once("  ") {
         Some((size, rest)) => (
             size.to_string(),
             rest.split("  ").next().unwrap_or("").to_string(),
         ),
-        None => (said.clone(), String::new()),
+        None => (disk.detail.clone(), String::new()),
     };
     let heading = match model.is_empty() {
-        true => format!("{device}  {size}"),
-        false => format!("{model} ({device})  {size}"),
+        true => format!("{}  {size}", disk.device),
+        false => format!("{model} ({})  {size}", disk.device),
     };
-    let parts = partitions(device).unwrap_or_default();
-    let rows: Vec<(String, String)> = match parts.is_empty() {
+    let rows: Vec<(String, String)> = match disk.partitions.is_empty() {
         true => vec![("no partitions".to_string(), String::new())],
-        false => parts
+        false => disk
+            .partitions
             .iter()
             .map(|part| {
                 let name = match part.label.is_empty() {
@@ -859,31 +957,79 @@ pub(crate) fn edit_luks(
     }
 }
 
-pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
-    let mut typed = String::new();
+pub(crate) fn slot_names(disk: &DiskScan, held: Option<&CustomLayout>) -> Vec<(usize, String)> {
+    let short = |device: &str, label: &str| match label.is_empty() {
+        true => device.rsplit('/').next().unwrap_or(device).to_string(),
+        false => label.to_string(),
+    };
+    let mut names: Vec<(usize, String)> = disk
+        .partitions
+        .iter()
+        .filter(|partition| !held.is_some_and(|held| held.deletes.contains(&partition.device)))
+        .filter_map(|partition| {
+            let label = held
+                .and_then(|held| held.renamed(&partition.device))
+                .unwrap_or(&partition.label);
+            let number = partition_number(&partition.device).ok()?;
+            Some((number, short(&partition.device, label)))
+        })
+        .collect();
+    if let Some(held) = held {
+        let devices = created_devices(
+            &disk.device,
+            &drawn_slots(&disk.partitions, &held.deletes),
+            held.creates.len(),
+        );
+        for (device, create) in devices.iter().zip(&held.creates) {
+            if let Ok(number) = partition_number(device) {
+                names.push((number, short(device, &create.label)));
+            }
+        }
+    }
+    names
+}
+
+pub(crate) fn ask_create(
+    rooms: Rooms,
+    holes: Vec<common::ui::Hole>,
+) -> Result<Option<(u64, u64)>, String> {
+    let header = [common::ui::HeaderLine::Placement {
+        holes,
+        offset: 0,
+        size: 1,
+        available: copy::ROW_AVAILABLE.to_string(),
+    }];
+    let mut offset = "0".to_string();
+    let mut size = match rooms.first {
+        0 => String::new(),
+        gb => gb.to_string(),
+    };
     let mut refusal = String::new();
     loop {
         let label = match refusal.is_empty() {
-            true => copy::NEW_SIZE.to_string(),
+            true => copy::ROW_PARTITION_SIZE.to_string(),
             false => refusal.clone(),
         };
-        let mut fields = vec![common::ui::Field::measure(&label, &typed, "GB")];
+        let mut fields = vec![
+            common::ui::Field::measure(copy::ROW_OFFSET, &offset, "GB"),
+            common::ui::Field::measure(&label, &size, "GB"),
+        ];
         let mut left: Vec<usize> = Vec::new();
         let filled = common::ui::in_titled_overlay(
             common::ui::WINDOW_WIDTH,
-            8,
+            13,
             copy::NEW_PARTITION,
             || {
                 common::ui::form(
                     &mut fields,
                     &[],
-                    |fields| size_short_of(&fields[0].value(), room),
+                    |fields| create_short_of(&fields[0].value(), &fields[1].value(), rooms.largest),
                     |_| Vec::new(),
-                    |_| vec![0],
+                    |_| vec![0, 1],
                     copy::SUBMIT_KEYS,
+                    &header,
                     &[],
-                    &[],
-                    0,
+                    1,
                     &mut left,
                 )
             },
@@ -891,9 +1037,15 @@ pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
         if !submitted(filled) {
             return Ok(None);
         }
-        typed = fields[0].value();
-        match size_short_of(&typed, room) {
-            None => return Ok(size_gb(&typed)),
+        offset = fields[0].value();
+        size = fields[1].value();
+        match create_short_of(&offset, &size, rooms.largest) {
+            None => {
+                return Ok(Some((
+                    size_gb(&offset).unwrap_or(0),
+                    size_gb(&size).unwrap_or(0),
+                )))
+            }
             Some(said) => {
                 refusal = match said.is_empty() {
                     true => copy::NEW_SIZE_NEEDED.to_string(),
@@ -911,13 +1063,45 @@ pub(crate) fn submitted(filled: common::ui::Filled) -> bool {
     )
 }
 
-pub(crate) fn size_short_of(typed: &str, room: u64) -> Option<String> {
-    let Some(size) = size_gb(typed) else {
+pub(crate) fn create_short_of(offset: &str, size: &str, room: u64) -> Option<String> {
+    let Some(size) = size_gb(size) else {
         return Some(String::new());
     };
-    match size == 0 || size > room {
+    let offset = size_gb(offset).unwrap_or(0);
+    match size == 0 || offset.saturating_add(size) > room {
         true => Some(copy::custom_too_big(room)),
         false => None,
+    }
+}
+
+pub(crate) fn ask_rename(partition: &str, held: &str) -> Result<Option<String>, String> {
+    let mut fields = vec![common::ui::Field::text(copy::NEW_NAME, held)];
+    let actions = [copy::RENAME_PART, copy::GO_BACK];
+    let header: Vec<common::ui::HeaderLine> = match partition.is_empty() {
+        true => Vec::new(),
+        false => vec![common::ui::HeaderLine::Row(partition.to_string())],
+    };
+    let mut left: Vec<usize> = Vec::new();
+    let filled = common::ui::in_overlay(40, 8, || {
+        common::ui::form(
+            &mut fields,
+            &actions,
+            |fields| match fields[0].value().is_empty() {
+                true => Some(copy::NAME_NEEDED.to_string()),
+                false => None,
+            },
+            |_| Vec::new(),
+            |_| vec![0],
+            copy::INSTALL_KEYS,
+            &header,
+            &[],
+            0,
+            &mut left,
+        )
+    })?;
+    match filled {
+        common::ui::Filled::Took(0) => Ok(Some(fields[0].value())),
+        _ => Ok(None),
     }
 }
 
@@ -1005,12 +1189,12 @@ pub(crate) fn layout_short_of(
         return Some(copy::custom_root_too_small(root.gb, reserve));
     }
     if let Some(table) = table {
-        if let Some(why) = table.wrong_label_for(&layout.deletes, layout.creates.len()) {
+        if let Some(why) =
+            table.wrong_label_for(&layout.deletes, layout.creates.len(), layout.renames.len())
+        {
             return Some(why);
         }
-        let room = table.appendable_gb(&layout.deletes);
-        let asked: u64 = layout.creates.iter().map(|create| create.gb).sum();
-        if asked > room {
+        if let Err(room) = place_creates(table, &layout.deletes, &layout.creates) {
             return Some(copy::custom_too_big(room));
         }
     }

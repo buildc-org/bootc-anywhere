@@ -105,6 +105,41 @@ fn the_root_reserve_is_twice_the_image_plus_slack() {
 }
 
 #[test]
+fn the_image_probe_reports_a_listing_that_ran() {
+    let probe = |payload: &Path, boot: &Path| {
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                payload::ESP_LIST,
+                "probe",
+                &payload.to_string_lossy(),
+                &boot.to_string_lossy(),
+            ])
+            .output()
+            .expect("a shell to run the probe")
+    };
+    let root = scratch("probe-list");
+    std::fs::create_dir_all(root.join("usr/lib/efi/grub2/1/EFI/fedora")).expect("an entry");
+    let out = probe(&root.join("usr/lib/efi"), &root.join("boot/EFI"));
+    assert!(out.status.success(), "the probe exits {}", out.status);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        root.join("usr/lib/efi/grub2/1/EFI/fedora")
+            .to_string_lossy()
+    );
+    let empty = scratch("probe-empty");
+    let out = probe(&empty.join("usr/lib/efi"), &empty.join("boot/EFI"));
+    assert!(out.status.success(), "the probe exits {}", out.status);
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+#[test]
 fn more_than_one_labelled_partition_is_named_rather_than_chosen() {
     assert!(labelled("\n").is_empty());
     assert_eq!(labelled("/dev/sdb2\n"), ["/dev/sdb2"]);

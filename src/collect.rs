@@ -11,10 +11,13 @@ impl Answers {
         if !prompt.draws() {
             return Ok(Some(seeded));
         }
-        let found_disks = disks(&sys_block(), &in_use_now());
+        let scan = Scan::read();
         let mut disk = seeded.disk.clone();
-        if disk.is_empty() && found_disks.len() == 1 {
-            disk = found_disks[0].0.clone();
+        if disk.is_empty() {
+            disk = scan.only_empty_disk().unwrap_or_default();
+        }
+        if let Some(why) = scan.refusal(&disk) {
+            return Err(why);
         }
         let chosen = seeded.encryption.kind.clone();
         let mut kind = match (
@@ -26,12 +29,11 @@ impl Answers {
             _ => chosen,
         };
         let mut layout: Option<CustomLayout> = None;
-        let mut fields = seeded.fields(payload, &disk, layout.as_ref(), "", &[]);
+        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref(), "");
         let panel = panel(payload);
         let mut cursor: Option<usize> = None;
         let mut reopen_on_table = false;
-        let mut found = Discovered::default();
-        let mut found_disk = String::new();
+        let mut focus_table = false;
         let mut start = 0;
         let mut left: Vec<usize> = Vec::new();
         loop {
@@ -41,40 +43,23 @@ impl Answers {
                 (true, _) => Some(CustomLayout::empty(&disk)),
                 (false, _) => None,
             };
-            let partitions: Vec<(String, Vec<Partition>)> = match manual {
-                true => found_disks
-                    .iter()
-                    .map(|(at, _)| Ok((at.clone(), partitions(at)?)))
-                    .collect::<Result<_, String>>()?,
-                false => Vec::new(),
-            };
-            let chosen = partitions
-                .iter()
-                .find(|(at, _)| at == &disk)
-                .map(|(_, parts)| parts.as_slice())
+            let chosen = scan
+                .get(&disk)
+                .map(|entry| entry.partitions.as_slice())
                 .unwrap_or(&[]);
             let table_now = match manual && !disk.is_empty() {
-                true => Some(disk_table(&disk)?),
+                true => Some(scan.table(&disk)?),
                 false => None,
             };
-            if manual && found_disk != disk {
-                found = old_keys(&disk, chosen);
-                found_disk = disk.clone();
-            }
-            if !manual {
-                found = Discovered::default();
-                found_disk.clear();
-            }
             let separate = fields[ROW_DATA].value() == copy::DATA_SEPARATE;
             let size = match separate {
                 true => fields[ROW_SIZE].value(),
                 false => String::new(),
             };
             let table = layout_table(
-                &found_disks,
+                &scan,
                 &disk,
                 layout.as_ref(),
-                &partitions,
                 payload,
                 &size,
                 separate,
@@ -88,7 +73,11 @@ impl Answers {
                     .position(|kind| matches!(kind, RowKind::Disk(at) if at == &disk))
                     .unwrap_or(0),
             };
-            fields[ROW_TABLE] = table.field(clamp_row(&table.selectable, at), !disk.is_empty());
+            fields[ROW_TABLE] = table.field(
+                clamp_row(&table.selectable, at),
+                !disk.is_empty(),
+                std::mem::take(&mut focus_table),
+            );
             fields[ROW_ENCRYPTION] = match layout.as_ref().filter(|layout| !layout.opens.is_empty())
             {
                 Some(layout) => encryption_row(
@@ -137,11 +126,17 @@ impl Answers {
             match filled {
                 Ok(common::ui::Filled::Took(0)) => {
                     let mut answers = Self::of(&fields, disk.clone(), layout.clone());
-                    if let Some(layout) = answers
-                        .layout
-                        .as_mut()
-                        .filter(|layout| !layout.deletes.is_empty() || !layout.creates.is_empty())
-                    {
+                    if let Some(held) = answers.layout.as_ref() {
+                        let esp = esp::removals(&scan, held);
+                        if let Some(layout) = answers.layout.as_mut() {
+                            layout.esp = esp;
+                        }
+                    }
+                    if let Some(layout) = answers.layout.as_mut().filter(|layout| {
+                        !layout.deletes.is_empty()
+                            || !layout.creates.is_empty()
+                            || !layout.renames.is_empty()
+                    }) {
                         let shown = table_now
                             .as_ref()
                             .ok_or("the partition table was not available to confirm")?;
@@ -198,6 +193,7 @@ impl Answers {
                 Ok(common::ui::Filled::Table { row, item, child }) => {
                     cursor = Some(row);
                     reopen_on_table = true;
+                    focus_table = true;
                     match table.kinds.get(row) {
                         Some(RowKind::Disk(at)) => {
                             let action = item
@@ -205,22 +201,22 @@ impl Answers {
                                 .copied();
                             match action {
                                 Some(PartAction::Create) => {
-                                    let planned: u64 = layout
-                                        .as_ref()
-                                        .map(|held| {
-                                            held.creates.iter().map(|create| create.gb).sum()
-                                        })
+                                    let (deletes, creates) = match layout.as_ref() {
+                                        Some(held) => (held.deletes.clone(), held.creates.clone()),
+                                        None => (Vec::new(), Vec::new()),
+                                    };
+                                    let disk_table = scan.table(at)?;
+                                    let names = scan
+                                        .get(at)
+                                        .map(|entry| slot_names(entry, layout.as_ref()))
                                         .unwrap_or_default();
-                                    let deletes = layout
-                                        .as_ref()
-                                        .map(|held| held.deletes.clone())
-                                        .unwrap_or_default();
-                                    let room = disk_table(at)?
-                                        .appendable_gb(&deletes)
-                                        .saturating_sub(planned);
-                                    if let Some(gb) = ask_size(room)? {
+                                    let rooms = create_rooms(&disk_table, &deletes, &creates);
+                                    let holes =
+                                        create_holes(&disk_table, &deletes, &creates, &names);
+                                    if let Some((offset, gb)) = ask_create(rooms, holes)? {
                                         held_layout(&mut layout, &disk).creates.push(Created {
                                             gb,
+                                            offset,
                                             ..Default::default()
                                         });
                                     }
@@ -236,11 +232,20 @@ impl Answers {
                                             chosen.iter().map(|part| part.device.clone()).collect();
                                         held.mounts.clear();
                                         held.opens.clear();
+                                        held.renames.clear();
                                     }
                                 }
                                 _ => {
-                                    if manual || confirm_disk(at, &found_disks)? {
+                                    if manual {
                                         disk = at.clone();
+                                    } else {
+                                        let confirmed = match scan.get(at) {
+                                            Some(entry) => confirm_disk(entry)?,
+                                            None => true,
+                                        };
+                                        if confirmed {
+                                            disk = at.clone();
+                                        }
                                     }
                                 }
                             }
@@ -298,6 +303,22 @@ impl Answers {
                                             {
                                                 create.target.clear();
                                             }
+                                        }
+                                    }
+                                }
+                                PartAction::Rename => {
+                                    let Some(create) =
+                                        layout.as_ref().and_then(|held| held.creates.get(index))
+                                    else {
+                                        continue;
+                                    };
+                                    let default = rename_default(&create.target, &create.label);
+                                    if let Some(label) = ask_rename("", &default)? {
+                                        if let Some(create) = layout
+                                            .as_mut()
+                                            .and_then(|held| held.creates.get_mut(index))
+                                        {
+                                            create.label = label;
                                         }
                                     }
                                 }
@@ -394,7 +415,28 @@ impl Answers {
                                         layout
                                             .opens
                                             .retain(|open| open.partition != partition.device);
+                                        layout
+                                            .renames
+                                            .retain(|rename| rename.partition != partition.device);
                                         layout.deletes.retain(|at| at != &partition.device);
+                                    }
+                                }
+                                PartAction::Rename => {
+                                    let current = layout
+                                        .as_ref()
+                                        .and_then(|held| held.renamed(&partition.device))
+                                        .unwrap_or(&partition.label)
+                                        .to_string();
+                                    if let Some(label) = ask_rename(&partition.device, &current)? {
+                                        let held = held_layout(&mut layout, &disk);
+                                        held.renames
+                                            .retain(|rename| rename.partition != partition.device);
+                                        if label != partition.label {
+                                            held.renames.push(Rename {
+                                                partition: partition.device.clone(),
+                                                label,
+                                            });
+                                        }
                                     }
                                 }
                                 PartAction::Delete => {
@@ -402,11 +444,16 @@ impl Answers {
                                     let held = held_layout(&mut layout, &disk);
                                     held.mounts.retain(|mount| mount.partition != device);
                                     held.opens.retain(|open| open.partition != device);
+                                    held.renames.retain(|rename| rename.partition != device);
                                     if !held.deletes.contains(&device) {
                                         held.deletes.push(device);
                                     }
                                 }
                                 PartAction::Open => {
+                                    let found = scan
+                                        .get(&disk)
+                                        .map(|entry| entry.keys.clone())
+                                        .unwrap_or_default();
                                     let key = match open_key(
                                         &partition.device,
                                         layout.as_ref(),
@@ -473,13 +520,8 @@ impl Answers {
                         cursor = None;
                         start = 0;
                         left.clear();
-                        fields = Self::seeded(payload, Given::default(), prompt)?.fields(
-                            payload,
-                            &disk,
-                            None,
-                            "",
-                            &[],
-                        )
+                        fields = Self::seeded(payload, Given::default(), prompt)?
+                            .fields(payload, &scan, &disk, None, "")
                     }
                     Leave::Back => {}
                 },
@@ -492,13 +534,8 @@ impl Answers {
                         cursor = None;
                         start = 0;
                         left.clear();
-                        fields = Self::seeded(payload, Given::default(), prompt)?.fields(
-                            payload,
-                            &disk,
-                            None,
-                            "",
-                            &[],
-                        )
+                        fields = Self::seeded(payload, Given::default(), prompt)?
+                            .fields(payload, &scan, &disk, None, "")
                     }
                     Leave::Back => {}
                 },
@@ -509,8 +546,10 @@ impl Answers {
 
     pub(crate) fn seeded(payload: &Payload, given: Given, prompt: &Prompt) -> Result<Self, String> {
         if !prompt.draws() {
+            let disk = ask_disk(given.disk, None, prompt)?;
+            partitions(&disk)?;
             return Ok(Self {
-                disk: ask_disk(given.disk, None, prompt)?,
+                disk,
                 hostname: prompt.text(
                     given.hostname,
                     copy::INSTALL_NAME,
@@ -539,10 +578,7 @@ impl Answers {
         }
         Ok(Self {
             disk: given.disk.unwrap_or_default(),
-            hostname: given
-                .hostname
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| payload.hostname.clone()),
+            hostname: given.hostname.unwrap_or_default(),
             user: given.user.unwrap_or_default(),
             password: given.password.unwrap_or_default(),
             encryption: Encryption {
@@ -562,18 +598,16 @@ impl Answers {
     pub(crate) fn fields(
         &self,
         payload: &Payload,
+        scan: &Scan,
         disk: &str,
         layout: Option<&CustomLayout>,
         var_size: &str,
-        partitions: &[(String, Vec<Partition>)],
     ) -> Vec<common::ui::Field> {
         use common::ui::Field;
-        let found = disks(&sys_block(), &in_use_now());
         let table = layout_table(
-            &found,
+            scan,
             disk,
             layout,
-            partitions,
             payload,
             var_size,
             !self.data.size.is_empty(),
@@ -604,7 +638,7 @@ impl Answers {
                 &self.data.size,
                 "GB",
             ),
-            table.field(0, !disk.is_empty()),
+            table.field(0, !disk.is_empty(), false),
             Field::secret(copy::ROW_PASSPHRASE, &self.encryption.passphrase),
             Field::secret(copy::ROW_PIN, &self.encryption.pin),
         ]
@@ -681,6 +715,14 @@ impl Answers {
                         (copy::ROW_REMOVED.to_string(), copy::summary_deleted(device))
                     }),
                 );
+                rows.extend(layout.esp.iter().flat_map(|removal| {
+                    removal.entries.iter().map(|entry| {
+                        (
+                            copy::ROW_REMOVED.to_string(),
+                            copy::summary_esp(entry, &removal.partition),
+                        )
+                    })
+                }));
                 rows.extend(layout.creates.iter().map(|create| {
                     (
                         create.target.clone(),
