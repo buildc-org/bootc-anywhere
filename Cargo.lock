@@ -53,7 +53,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/buildc-org/common?rev=49dec6cbd939993ba35976c1ba145402eaeb5733#49dec6cbd939993ba35976c1ba145402eaeb5733"
+source = "git+https://github.com/buildc-org/common?rev=c7e9c09e315173d59ea54d659148136a559dc937#c7e9c09e315173d59ea54d659148136a559dc937"
 dependencies = [
  "libc",
  "ratatui",

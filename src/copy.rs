@@ -109,6 +109,8 @@ pub fn crypttab_line(name: &str, uuid: &str, keyfile: Option<&str>) -> String {
 
 pub const ENROLLING: &str = "enrolling disk auto-unlock; this takes a few seconds";
 
+pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+
 pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String {
     let enroll = match pcr_policy {
         true => {
@@ -117,6 +119,36 @@ pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String 
         }
         false => "--tpm2-pcrs=7",
     };
+    let credential = format!("{}/{}.cred", crate::CREDENTIAL_DIR, crate::CREDENTIAL);
+    let marker = format!("{}/{}", crate::CREDENTIAL_DIR, crate::SLOT_FILE);
+    let script = format!(
+        "mnt=/run/tpm2-enroll-esp; slot=; esp=; \
+         while read -r name parttype; do \
+           [ \"$parttype\" = \"{ESP_TYPE}\" ] || continue; \
+           mkdir -p \"$mnt\"; \
+           mount \"/dev/$name\" \"$mnt\" 2>/dev/null || continue; \
+           if [ -s \"$mnt/{marker}\" ]; then \
+             slot=$(cat \"$mnt/{marker}\"); esp=$name; break; \
+           fi; \
+           umount \"$mnt\" 2>/dev/null; \
+         done < <(lsblk -rno NAME,PARTTYPE); \
+         wipe=; \
+         if [ -n \"$slot\" ] && cryptsetup luksDump \"/dev/disk/by-uuid/{uuid}\" | grep -qE \"^[[:space:]]*$slot: luks2\"; then \
+           wipe=\"--wipe-slot=$slot\"; \
+         fi; \
+         for i in 1 2 3 4 5; do \
+           if /usr/bin/systemd-cryptenroll --tpm2-device=auto {enroll} \
+              --unlock-key-file={key} $wipe /dev/disk/by-uuid/{uuid}; then \
+             if [ -n \"$esp\" ]; then \
+               rm -f \"$mnt/{credential}\" \"$mnt/{marker}\" || exit 1; \
+               umount \"$mnt\" || exit 1; \
+             fi; \
+             exit 0; \
+           fi; \
+           sleep 5; \
+         done; \
+         exit 1"
+    );
     format!(
         "[Unit]\n\
          Description=Enroll the {name} container for TPM2 unlock\n\
@@ -132,8 +164,7 @@ pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String 
          StandardOutput=journal+console\n\
          StandardError=journal+console\n\
          ExecStartPre=/bin/echo '{ENROLLING}'\n\
-         ExecStart=/usr/bin/systemd-cryptenroll --tpm2-device=auto {enroll} \
-         --unlock-key-file={key} /dev/disk/by-uuid/{uuid}\n\
+         ExecStart=/bin/bash -c '{script}'\n\
          ExecStartPost=-/usr/bin/shred -u {key}\n\
          ExecStartPost=-/usr/bin/systemctl disable tect-tpm2-enroll-{name}.service\n\
          \n\
@@ -413,7 +444,27 @@ pub const LEAVE_OVER: &str = "Start the form again";
 pub const LEAVE_SHELL: &str = "Quit the installer";
 pub const INSTALL_DONE: &str = "Installation Complete!";
 pub const RESTART: &str = "Restart now";
-pub const DONE_KEYS: &str = "enter to restart, esc to quit the installer";
+pub const DONE_KEYS: &str = "enter to finalize, esc to quit the installer";
+pub const FINALIZE_AUTO: &str = "Restart and finalize (automatic)";
+pub const FINALIZE_MANUAL: &str = "Restart and finalize (manual)";
+pub fn automatic_explanation() -> [&'static str; 2] {
+    [
+        "The installer will reboot once to automatically enrol LUKS with the TPM. \
+         This creates a temporary TPM-encrypted LUKS key on the ESP partition which \
+         will be used to unlock the LUKS partition on the next boot. A post-install \
+         script will then automatically enrol the LUKS partition with the TPM, remove \
+         the temporary key entry from the LUKS partition and delete the temporary key \
+         before restarting.",
+        "If you would prefer to manually unlock the LUKS partition on the next boot \
+         with the recovery key, choose 'Manual' below.",
+    ]
+}
+pub const AUTO_WINDOW: &str = "until then this key opens the disk without a passphrase";
+pub const AUTO_WINDOW_PIN: &str = "until then this key opens the disk without the PIN";
+pub const AUTO_NO_STUB: &str = "the image does not boot through systemd-stub";
+pub const AUTO_NO_POLICY: &str = "the image has no signed PCR policy to seal to";
+pub const AUTO_NO_ROOT: &str = "no encrypted root was found";
+pub const AUTO_FAILED: &str = "the automatic finalize failed; choose manual restart";
 
 pub fn next_steps_setup() -> &'static str {
     "Before the installed image can boot you will need to set secure-boot to 'setup mode'. Exact steps to enable 'setup mode' are vendor specific but may require you to set secure-boot to 'custom' then deleting the existing platform key (PK)."
@@ -532,6 +583,31 @@ mod tests {
             super::ENROLLING.chars().count() < 60,
             "{}",
             super::ENROLLING
+        );
+    }
+
+    #[test]
+    fn a_tpm2_unit_cleans_up_an_automatic_finalize() {
+        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "abcd", true);
+        assert!(unit.contains(&format!("\"{}\"", super::ESP_TYPE)), "{unit}");
+        assert!(
+            unit.contains("loader/credentials/cryptsetup.slot"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("loader/credentials/cryptsetup.passphrase.cred"),
+            "{unit}"
+        );
+        assert!(unit.contains("--wipe-slot=$slot"), "{unit}");
+        assert!(
+            unit.contains("--unlock-key-file=/etc/tect/tpm2-enroll-root.key $wipe"),
+            "{unit}"
+        );
+        assert!(unit.contains("for i in 1 2 3 4 5"), "{unit}");
+        assert!(
+            unit.contains("rm -f \"$mnt/loader/credentials/cryptsetup.passphrase.cred\"")
+                && unit.contains("|| exit 1"),
+            "{unit}"
         );
     }
 

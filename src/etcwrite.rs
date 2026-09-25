@@ -3,7 +3,7 @@ use std::io::{Read as _, Write as _};
 
 const ROOT_MOUNT: &str = "/run/tect-root";
 
-const ROOT_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
+pub(crate) const ROOT_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
 
 struct EtcWrite {
     pub(crate) at: String,
@@ -96,7 +96,7 @@ fn data_volume(
         (Key::Passphrase(_), Opened::AddKey) => {
             let before = slots(&open.partition)?.keys;
             let key = random_key()?;
-            add_key(open, &key)?;
+            add_key(open, &key, free_slot(&before)?)?;
             if !test_key(&open.partition, &key)? {
                 return Err(copy::added_key_wrong(&open.partition));
             }
@@ -308,7 +308,57 @@ fn luks_uuid(partition: &str) -> Result<String, String> {
     }
 }
 
-fn add_key(open: &LuksOpen, key: &[u8]) -> Result<(), String> {
+pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), String> {
+    let at = staged_key(key)?;
+    let mut command = Command::new("cryptsetup");
+    command.args(["-q", "luksAddKey"]);
+    command.arg(format!("--key-slot={slot}"));
+    command.args(auth_args(&open.key));
+    command.arg(&open.partition).arg(&at.0);
+    run_with_key(command, &open.key, "adds a key")
+        .map_err(|why| format!("adding a key to {}: {why}", open.partition))
+}
+
+pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
+    const SLOTS: u32 = 32;
+    (0..SLOTS)
+        .find(|at| !keys.contains(at))
+        .ok_or_else(|| format!("all {SLOTS} key slots are in use"))
+}
+
+pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
+    match key {
+        Key::File(path) => vec!["--key-file".into(), path.as_os_str().to_os_string()],
+        _ => vec!["--key-file".into(), "-".into()],
+    }
+}
+
+pub(crate) fn run_with_key(mut command: Command, key: &Key, what: &str) -> Result<(), String> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    if key.bytes().is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("cryptsetup: {err}, and it is what {what}"))?;
+    if let Some(bytes) = key.bytes() {
+        child
+            .stdin
+            .take()
+            .ok_or("cryptsetup: no stdin")?
+            .write_all(bytes)
+            .map_err(|err| format!("cryptsetup: {err}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+pub(crate) fn staged_key(key: &[u8]) -> Result<Staged, String> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let at = std::env::temp_dir().join(format!(
         "tect-luks-key.{}.{:x}",
@@ -328,49 +378,10 @@ fn add_key(open: &LuksOpen, key: &[u8]) -> Result<(), String> {
     file.write_all(key)
         .map_err(|err| format!("{}: {err}", at.0.display()))?;
     drop(file);
-    let mut command = Command::new("cryptsetup");
-    command.args(["-q", "luksAddKey"]);
-    match &open.key {
-        Key::File(path) => {
-            command.arg("--key-file").arg(path);
-        }
-        _ => {
-            command.args(["--key-file", "-"]);
-        }
-    }
-    command.arg(&open.partition).arg(&at.0);
-    command.stdout(Stdio::null()).stderr(Stdio::piped());
-    if open.key.bytes().is_some() {
-        command.stdin(Stdio::piped());
-    }
-    let added = (|| {
-        let mut child = command
-            .spawn()
-            .map_err(|err| format!("cryptsetup: {err}, and it is what adds a key"))?;
-        if let Some(bytes) = open.key.bytes() {
-            child
-                .stdin
-                .take()
-                .ok_or("cryptsetup: no stdin")?
-                .write_all(bytes)
-                .map_err(|err| format!("cryptsetup: {err}"))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|err| format!("cryptsetup: {err}"))?;
-        match out.status.success() {
-            true => Ok(()),
-            false => Err(format!(
-                "adding a key to {}: {}",
-                open.partition,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
-        }
-    })();
-    added
+    Ok(at)
 }
 
-fn random_key() -> Result<Vec<u8>, String> {
+pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut bytes))

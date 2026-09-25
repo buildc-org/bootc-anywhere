@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-common = { git = "https://github.com/buildc-org/common", rev = "49dec6cbd939993ba35976c1ba145402eaeb5733" }
+common = { git = "https://github.com/buildc-org/common", rev = "c7e9c09e315173d59ea54d659148136a559dc937" }
 
 [profile.release]
 opt-level = 1

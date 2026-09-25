@@ -68,6 +68,25 @@ fn the_root_device_is_where_the_layout_put_it() {
 }
 
 #[test]
+fn the_authenticating_key_keeps_its_form() {
+    let words = |key: &Key| -> Vec<String> {
+        auth_args(key)
+            .iter()
+            .map(|word| word.to_string_lossy().to_string())
+            .collect()
+    };
+    assert_eq!(
+        words(&Key::File(PathBuf::from("/run/key"))),
+        ["--key-file", "/run/key"]
+    );
+    assert_eq!(
+        words(&Key::Passphrase("opensesame".to_string())),
+        ["--key-file", "-"]
+    );
+    assert_eq!(words(&Key::Data(vec![1, 2, 3])), ["--key-file", "-"]);
+}
+
+#[test]
 fn a_partition_number_is_the_trailing_digits() {
     assert_eq!(partition_number("/dev/vda3").expect("a number"), 3);
     assert_eq!(partition_number("/dev/nvme0n1p12").expect("a number"), 12);

@@ -104,12 +104,17 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
         true => recovery_volumes(answers),
         false => Vec::new(),
     };
+    let offered = match prompt.draws() {
+        true => automatic::offered(payload, answers, recovery.as_deref()),
+        false => Offered::None,
+    };
     finish(
         recovery.as_deref(),
         at.as_deref(),
         steps,
         &notes,
         &volumes,
+        offered,
         prompt,
     )
 }
@@ -130,6 +135,7 @@ pub(crate) fn finish(
     steps: Option<&str>,
     notes: &[String],
     volumes: &[String],
+    offered: Offered,
     prompt: &Prompt,
 ) -> Result<(), String> {
     if !prompt.draws() {
@@ -149,14 +155,33 @@ pub(crate) fn finish(
         eprintln!("{PROGRAM}: {}", copy::logging(log));
         return Ok(());
     }
-    match common::ui::offer_over(
-        copy::INSTALL_DONE,
-        done_rows(recovery, log, steps, notes, volumes),
-        copy::RESTART,
-        copy::DONE_KEYS,
-    )? {
-        false => Ok(()),
-        true => restart(),
+    let mut offered = offered;
+    loop {
+        let rows = done_rows(recovery, log, steps, notes, volumes, &offered);
+        let mut actions = Vec::new();
+        match &offered {
+            Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
+            Offered::Unavailable(why) => {
+                actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
+            }
+            Offered::None => actions.push(Choice::new(copy::RESTART, "")),
+        }
+        if !matches!(offered, Offered::None) {
+            actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
+        }
+        match common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)? {
+            None => return Ok(()),
+            Some(at) => {
+                if let (0, Offered::Ready(ready)) = (at, &offered) {
+                    if let Err(why) = automatic::finalize(ready) {
+                        eprintln!("{PROGRAM}: {why}");
+                        offered = Offered::Unavailable(copy::AUTO_FAILED.to_string());
+                        continue;
+                    }
+                }
+                return restart();
+            }
+        }
     }
 }
 
@@ -166,6 +191,7 @@ pub(crate) fn done_rows(
     steps: Option<&str>,
     notes: &[String],
     volumes: &[String],
+    offered: &Offered,
 ) -> Vec<Choice> {
     let mut rows = Vec::new();
     if let Some(key) = recovery {
@@ -191,6 +217,24 @@ pub(crate) fn done_rows(
         rows.push(Choice::new(note.clone(), "").content());
     }
     rows.push(Choice::new(copy::logging(log), "").content());
+    if !matches!(offered, Offered::None) {
+        rows.push(Choice::new("", ""));
+        for (at, paragraph) in copy::automatic_explanation().into_iter().enumerate() {
+            if at > 0 {
+                rows.push(Choice::new("", ""));
+            }
+            for line in common::ui::table::wrap(paragraph, common::ui::ROW_ROOM) {
+                rows.push(Choice::new(line, "").content());
+            }
+        }
+        if let Offered::Ready(ready) = offered {
+            let window = match ready.pin {
+                true => copy::AUTO_WINDOW_PIN,
+                false => copy::AUTO_WINDOW,
+            };
+            rows.push(Choice::new(window, "").warning().content());
+        }
+    }
     rows
 }
 
