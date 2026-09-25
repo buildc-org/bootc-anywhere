@@ -90,6 +90,62 @@ fn a_layout_finalizes_only_an_opened_root() {
 }
 
 #[test]
+fn only_a_partition_with_boot_files_carries_the_credential() {
+    let bare = scratch("automatic-bare");
+    assert!(!carries_boot_files(&bare));
+    let entries = scratch("automatic-entries");
+    std::fs::create_dir_all(entries.join("loader/entries")).unwrap();
+    assert!(carries_boot_files(&entries));
+    let uki = scratch("automatic-uki");
+    std::fs::create_dir_all(uki.join("EFI/Linux")).unwrap();
+    assert!(carries_boot_files(&uki));
+    let _ = std::fs::remove_dir_all(&bare);
+    let _ = std::fs::remove_dir_all(&entries);
+    let _ = std::fs::remove_dir_all(&uki);
+}
+
+#[test]
+fn a_failed_finalize_names_the_slot_it_left_behind() {
+    let why = "sealing the one-time key failed".to_string();
+    assert_eq!(discarded_message(3, why.clone(), Ok(())), why);
+    let left = discarded_message(3, why.clone(), Err("device is busy".to_string()));
+    assert!(left.starts_with(&why), "{left}");
+    assert!(left.contains("slot 3"), "{left}");
+    assert!(left.contains("device is busy"), "{left}");
+}
+
+#[test]
+fn the_slot_removal_names_the_device_then_the_slot() {
+    let ready = Ready {
+        image: "example.invalid/image:1".to_string(),
+        disk: "/dev/vda".to_string(),
+        partition: "/dev/vda3".to_string(),
+        key: Key::Passphrase("recovery".to_string()),
+        pin: false,
+    };
+    let command = kill_slot_command(&ready, 7);
+    assert_eq!(command.get_program(), "cryptsetup");
+    let words: Vec<String> = command
+        .get_args()
+        .map(|word| word.to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        words,
+        ["-q", "luksKillSlot", "--key-file", "-", "/dev/vda3", "7"]
+    );
+}
+
+#[test]
+fn a_failed_seal_leaves_the_slot_marker_behind() {
+    let esp = scratch("automatic-marker");
+    let failed = credential_with(&esp, 7, |_| Err("the seal failed".to_string()));
+    assert_eq!(failed.unwrap_err(), "the seal failed");
+    let marker = esp.join(CREDENTIAL_DIR).join(SLOT_FILE);
+    assert_eq!(std::fs::read_to_string(&marker).expect("the marker"), "7\n");
+    let _ = std::fs::remove_dir_all(&esp);
+}
+
+#[test]
 fn a_grub_image_is_refused_before_the_image_probe() {
     let payload = a_payload();
     assert!(payload.boot.is_empty());

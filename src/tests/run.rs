@@ -39,6 +39,84 @@ fn the_last_screen_heads_the_key_and_the_steps() {
     );
 }
 
+fn a_ready() -> Ready {
+    Ready {
+        image: "example.invalid/image:1".to_string(),
+        disk: "/dev/vda".to_string(),
+        partition: "/dev/vda2".to_string(),
+        key: Key::Passphrase("recovery".to_string()),
+        pin: false,
+    }
+}
+
+#[test]
+fn a_failed_finalize_draws_the_screen_again_with_the_reason() {
+    let mut offered = Offered::Ready(a_ready());
+    let mut drawn = Vec::new();
+    let mut restarts = 0;
+    choosing(
+        &mut offered,
+        |offered| {
+            drawn.push(match offered {
+                Offered::Ready(_) => 0,
+                Offered::Unavailable(_) => 1,
+                Offered::None => 2,
+            });
+            Ok(Some(drawn.len() - 1))
+        },
+        |_| Err("the seal failed".to_string()),
+        || {
+            restarts += 1;
+            Ok(())
+        },
+    )
+    .expect("the manual action ends the loop");
+    assert_eq!(drawn, [0, 1], "the screen is drawn again after the failure");
+    assert_eq!(restarts, 1);
+    match &offered {
+        Offered::Unavailable(why) => assert_eq!(why, copy::AUTO_FAILED),
+        _ => panic!("a failed finalize must leave the automatic action unavailable"),
+    }
+}
+
+#[test]
+fn a_successful_finalize_restarts_at_once() {
+    let mut offered = Offered::Ready(a_ready());
+    let mut drawn = 0;
+    let mut finalized = 0;
+    let mut restarts = 0;
+    choosing(
+        &mut offered,
+        |_| {
+            drawn += 1;
+            Ok(Some(0))
+        },
+        |_| {
+            finalized += 1;
+            Ok(())
+        },
+        || {
+            restarts += 1;
+            Ok(())
+        },
+    )
+    .expect("the restart ends the loop");
+    assert_eq!((drawn, finalized, restarts), (1, 1, 1));
+}
+
+#[test]
+fn esc_ends_the_last_screen_without_restarting() {
+    let mut offered = Offered::Ready(a_ready());
+    choosing(
+        &mut offered,
+        |_| Ok(None),
+        |_| panic!("no action was taken"),
+        || panic!("nothing asked for a restart"),
+    )
+    .expect("esc is an ending");
+    assert!(matches!(offered, Offered::Ready(_)));
+}
+
 #[test]
 fn the_last_screen_explains_the_two_actions() {
     let ready = |pin| {
