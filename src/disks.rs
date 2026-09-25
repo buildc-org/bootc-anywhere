@@ -296,10 +296,14 @@ pub(crate) fn slots_from(raw: &str) -> Result<Slots, String> {
     Ok(Slots { keys, tokens })
 }
 
-pub(crate) fn data_rows() -> Vec<Choice> {
+pub(crate) fn data_rows(composefs: bool) -> Vec<Choice> {
+    let separate = Choice::new(copy::DATA_SEPARATE, "");
     vec![
         Choice::new(copy::DATA_TOGETHER, ""),
-        Choice::new(copy::DATA_SEPARATE, ""),
+        match composefs {
+            true => separate.hidden(),
+            false => separate,
+        },
     ]
 }
 

@@ -55,7 +55,7 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
 
 #[test]
 fn the_home_row_offers_together_or_a_partition_of_its_own() {
-    let rows = data_rows();
+    let rows = data_rows(false);
     let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
     assert_eq!(labels, [copy::DATA_TOGETHER, copy::DATA_SEPARATE]);
     assert!(rows.iter().all(|row| row.available));
@@ -68,6 +68,11 @@ fn the_home_row_offers_together_or_a_partition_of_its_own() {
         }),
         copy::DATA_SEPARATE
     );
+    let locked = data_rows(true);
+    assert_eq!(locked[0].label, copy::DATA_TOGETHER);
+    assert!(!locked[0].hidden);
+    assert_eq!(locked[1].label, copy::DATA_SEPARATE);
+    assert!(locked[1].hidden);
 }
 
 #[test]
@@ -320,4 +325,37 @@ fn the_home_answer_reads_as_together_or_separate() {
     let separate = chose(copy::DATA_SEPARATE, "200 GB");
     assert_eq!(data_said(&separate), copy::DATA_SEPARATE);
     assert_eq!(separate.size, "200 GB");
+}
+
+#[test]
+fn a_composefs_target_hides_the_separate_home_answer() {
+    let answers = Answers {
+        disk: "/dev/vda".to_string(),
+        hostname: "deb2".to_string(),
+        user: "tect".to_string(),
+        password: "hunter2".to_string(),
+        opened: Opened::Keep,
+        encryption: Encryption {
+            kind: NONE.to_string(),
+            passphrase: String::new(),
+            pin: String::new(),
+        },
+        data: Data::default(),
+        layout: None,
+    };
+    let separate_hidden = |composefs: bool| -> bool {
+        let mut payload = a_payload();
+        payload.composefs = composefs;
+        let fields = answers.fields(&payload, &Scan::default(), "/dev/vda", None, "");
+        let common::ui::Field::Pick { options, .. } = &fields[ROW_DATA] else {
+            panic!("the home row is a pick");
+        };
+        options
+            .iter()
+            .find(|choice| choice.label == copy::DATA_SEPARATE)
+            .expect("the separate answer keeps its index")
+            .hidden
+    };
+    assert!(separate_hidden(true));
+    assert!(!separate_hidden(false));
 }

@@ -399,16 +399,6 @@ esac
             b"", 
             b"\x1b[A", 
             b"\x1b[A", 
-            b"\r", 
-            b"\x1b[B", 
-            b"\r", 
-            b"\x1b[B", 
-            b"20\r", 
-            b"\x1b[B", 
-            b"\x1b[B", 
-            b"\x1b[A", 
-            b"\x1b[A", 
-            b"\x1b[A", 
             b"\x1b[A", 
             b"\r", 
             b"\r", 
@@ -507,15 +497,16 @@ esac
         installer::copy::FORMAT_TICK,
         "68.7 GB",
         "64.4 GB",
-        "/var/home",
-        "20.0 GB",
-        "\u{2514}\u{2500} size",
     ] {
         assert!(
             transcript.contains(phrase),
             "{phrase} is not drawn: {transcript}"
         );
     }
+    assert!(
+        !transcript.contains(installer::copy::DATA_SEPARATE),
+        "the hidden separate-home answer is drawn: {transcript}"
+    );
     for phrase in ["fedora", "Test OS"] {
         assert!(
             transcript.contains(phrase),
