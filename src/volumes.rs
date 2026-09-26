@@ -71,9 +71,6 @@ pub(crate) fn open_command(open: &LuksOpen, name: &str) -> Command {
 }
 
 pub(crate) fn open_volume(open: &LuksOpen, name: &str) -> Result<(), String> {
-    if Path::new(&mapper_path(name)).exists() {
-        let _ = close_volume(name);
-    }
     let mut command = open_command(open, name);
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     if open.key.bytes().is_some() {
@@ -98,6 +95,39 @@ pub(crate) fn open_volume(open: &LuksOpen, name: &str) -> Result<(), String> {
         false => Err(format!(
             "cryptsetup could not open {}: {}",
             open.partition,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn format_command(partition: &str) -> Command {
+    let mut command = Command::new("cryptsetup");
+    command
+        .args(["-q", "luksFormat", "--type", "luks2", "--key-file", "-"])
+        .arg(partition);
+    command
+}
+
+pub(crate) fn luks_format(partition: &str, key: &[u8]) -> Result<(), String> {
+    let mut child = format_command(partition)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("cryptsetup: {err}, and it is what encrypts {partition}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("cryptsetup: no stdin")?
+        .write_all(key)
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "cryptsetup could not encrypt {partition}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }

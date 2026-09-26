@@ -1,20 +1,38 @@
 use super::*;
 use std::io::{BufRead as _, Write as _};
 
+const TICK: std::time::Duration = std::time::Duration::from_millis(120);
+const STORAGE_CONF: &str = "/etc/containers/storage.conf";
+
 pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), String> {
     require_signed_boot_chain(&payload.image, &payload.boot)?;
-    if answers.opened == Opened::Tpm2 {
+    if answers.opened == Opened::Tpm2 || answers.encryption.kind.starts_with("tpm2-") {
         require_tpm2_enrolment(&payload.image)?;
     }
-    complete(&payload.recipe, answers)?;
-    if let Some(layout) = answers.layout.as_mut() {
-        cut_partitions(layout)?;
+    validate_recipe(payload)?;
+    if !portable_name(&answers.user) {
+        return Err(copy::account_name(&answers.user));
     }
-    if let Some(layout) = answers.layout.as_ref() {
-        esp::remove(layout)?;
-    }
-    let _opened = open_volumes(answers.layout.as_ref())?;
-    let staged = stage(&complete(&payload.recipe, answers)?)?;
+    let password_hash = hashed(&answers.password)?;
+    let mut prepared = prepare(payload, answers)?;
+    let changes_table = prepared.layout.changes_table();
+    installed(payload, answers, prompt, &password_hash, &mut prepared).map_err(|why| {
+        match changes_table {
+            true => format!("{why}\n\n{}", copy::table_already_changed(&answers.disk)),
+            false => why,
+        }
+    })
+}
+
+fn installed(
+    payload: &Payload,
+    answers: &mut Answers,
+    prompt: &Prompt,
+    password_hash: &str,
+    prepared: &mut Prepared,
+) -> Result<(), String> {
+    let karg = root_luks_arg(&prepared.layout, &payload.boot)?;
+    let mut command = bootc_command(&payload.install, karg.as_deref());
     let (mut log, at) = open_log(payload);
     if !prompt.draws() {
         eprintln!(
@@ -25,21 +43,21 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
             copy::logging(at.as_deref())
         );
     }
-    let (events, writer) = std::io::pipe().map_err(|err| format!("{BACKEND}: {err}"))?;
-    let errors = writer
-        .try_clone()
-        .map_err(|err| format!("{BACKEND}: {err}"))?;
-    let mut child = Command::new(BACKEND)
-        .arg(&staged.0)
+    let (events, writer) = std::io::pipe().map_err(|err| format!("podman: {err}"))?;
+    let errors = writer.try_clone().map_err(|err| format!("podman: {err}"))?;
+    let mut child = command
         .stdout(Stdio::from(writer))
         .stderr(Stdio::from(errors))
         .spawn()
-        .map_err(|err| format!("{BACKEND}: {err}"))?;
+        .map_err(|err| format!("podman: {err}, and it is what runs bootc"))?;
+    drop(command);
     let mut region = match prompt.draws() {
         true => common::ui::Progress::open(&copy::writing(at.as_deref())).ok(),
         false => None,
     };
-    let mut recovery = None;
+    if let Some(region) = &mut region {
+        let _ = region.step(0, 100, "Installing the operating system");
+    }
     {
         let (lines, arriving) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -63,43 +81,36 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let event = Event::of(&line);
-            if let Event::Recovery(key) = &event {
-                recovery = Some(key.clone());
-            }
-            if let (Some(said), Some(log)) = (event.logged(), &mut log) {
-                let _ = writeln!(log, "{said}");
+            if let Some(log) = &mut log {
+                let _ = writeln!(log, "{line}");
             }
             match &mut region {
-                None => println!("{}", event.say()),
+                None => println!("{line}"),
                 Some(region) => {
-                    let _ = match &event {
-                        Event::Step(pct, flight, what) => region.step(*pct, *flight, what),
-                        Event::Done(message) => region.step(100, 0, message),
-                        Event::Recovery(_) => Ok(()),
-                        Event::Note(message) => region.note(message),
-                        Event::Other(line) => region.note(line),
-                    };
+                    let _ = region.note(&line);
                 }
             }
         }
     }
-    let finished = child.wait().map_err(|err| format!("{BACKEND}: {err}"));
-    if let Some(region) = region {
+    let finished = child.wait().map_err(|err| format!("podman: {err}"));
+    if let Some(mut region) = region {
+        if finished.as_ref().is_ok_and(|status| status.success()) {
+            let _ = region.step(100, 0, "Operating system installed");
+        }
         region.close();
     }
-    drop(staged);
     let status = finished?;
     if !status.success() {
         return Err(format!(
-            "{BACKEND} did not finish: {status}, and {}",
+            "bootc did not finish: {status}, and {}",
             copy::logging(at.as_deref())
         ));
     }
-    let notes = arrange(payload, answers)?;
+    let notes = arrange(payload, answers, &prepared.layout, password_hash)?;
     configure_boot_chain(&payload.image, &answers.disk, &payload.boot)?;
     render_menu(&payload.image, &answers.disk)?;
     let steps = next_steps(&payload.boot, &firmware(payload));
+    let recovery = prepared.recovery.take();
     let volumes = match recovery.is_some() {
         true => recovery_volumes(answers),
         false => Vec::new(),
@@ -117,6 +128,103 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
         offered,
         prompt,
     )
+}
+
+fn validate_recipe(payload: &Payload) -> Result<(), String> {
+    if !Path::new(STORAGE_CONF).is_file() {
+        return Err(format!(
+            "{STORAGE_CONF}: missing, and bootc needs it to read the media store"
+        ));
+    }
+    for store in &payload.install.stores {
+        if !store.starts_with('/') || store.contains(':') || !Path::new(store).is_dir() {
+            return Err(format!(
+                "{}: `additionalImageStores` names unusable path {store:?}",
+                payload.recipe.display()
+            ));
+        }
+    }
+    let held = Command::new("podman")
+        .args(["image", "exists", &payload.install.image])
+        .output()
+        .map_err(|err| format!("podman: {err}, and it is what reads the media store"))?;
+    match held.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => Err(format!(
+            "no store {STORAGE_CONF} names holds {}",
+            payload.install.image
+        )),
+        _ => Err(format!(
+            "podman could not read the stores {STORAGE_CONF} names: {}",
+            String::from_utf8_lossy(&held.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn bootc_command(recipe: &InstallRecipe, karg: Option<&str>) -> Command {
+    let mut command = Command::new("podman");
+    command.args([
+        "run",
+        "--rm",
+        "--pull=never",
+        "--privileged",
+        "--pid=host",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        "/dev:/dev",
+        "-v",
+        "/var/lib/containers:/var/lib/containers",
+    ]);
+    for store in &recipe.stores {
+        command.args(["-v", &format!("{store}:{store}:ro")]);
+    }
+    command.args([
+        "-v",
+        &format!("{STORAGE_CONF}:{STORAGE_CONF}:ro"),
+        "-v",
+        &format!("{SYSROOT}:/target"),
+        &recipe.image,
+        "bootc",
+        "install",
+        "to-filesystem",
+        // The installer finalizes the target, so bootc must leave it unfinalized.
+        "--skip-finalize",
+        "--target-imgref",
+        &recipe.target_imgref,
+    ]);
+    if recipe.composefs {
+        command.arg("--composefs-backend");
+    }
+    if !recipe.bootloader.is_empty() && recipe.bootloader != "grub2" {
+        command.args(["--bootloader", &recipe.bootloader]);
+    }
+    if recipe.generic {
+        command.arg("--generic-image");
+    }
+    if let Some(karg) = karg {
+        command.args(["--karg", karg]);
+    }
+    command.arg("/target");
+    command
+}
+
+fn root_luks_arg(layout: &CustomLayout, boot: &str) -> Result<Option<String>, String> {
+    // A UKI boot chain needs no LUKS name argument, because the booted system finds the root by its GPT type.
+    if !boot.is_empty() {
+        return Ok(None);
+    }
+    let Some((name, open)) = layout
+        .mappers()
+        .into_iter()
+        .find(|(_, open)| open.target == "/")
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "rd.luks.name={}={name}",
+        luks_uuid(&open.partition)?
+    )))
 }
 
 fn recovery_volumes(answers: &Answers) -> Vec<String> {

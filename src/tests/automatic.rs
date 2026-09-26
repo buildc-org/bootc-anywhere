@@ -39,7 +39,6 @@ fn answers(kind: &str, passphrase: &str) -> Answers {
             passphrase: passphrase.to_string(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: None,
         opened: Opened::Keep,
     }

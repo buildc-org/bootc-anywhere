@@ -54,78 +54,12 @@ fn a_created_partition_answers_the_same_rules() {
 }
 
 #[test]
-fn a_created_partition_reaches_the_recipe_as_the_node_it_got() {
-    let mut layout = CustomLayout::empty("/dev/vda");
-    layout.creates = vec![
-        Created {
-            gb: 2,
-            target: "/boot/efi".to_string(),
-            fstype: "fat32".to_string(),
-            device: "/dev/vda1".to_string(),
-            ..Default::default()
-        },
-        Created {
-            gb: 8,
-            target: "/swap".to_string(),
-            fstype: "swap".to_string(),
-            device: "/dev/vda2".to_string(),
-            ..Default::default()
-        },
-    ];
-    let root = scratch("created-recipe");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(layout),
-    };
-    let done = complete(&recipe, &answers).expect("a created-partition recipe");
-    let mounts = json::items(&done, "customMounts");
-    let said: Vec<(String, String, String)> = mounts
-        .iter()
-        .map(|mount| {
-            (
-                json::text(mount, "partition").unwrap_or_default(),
-                json::text(mount, "target").unwrap_or_default(),
-                json::text(mount, "fstype").unwrap_or_default(),
-            )
-        })
-        .collect();
-    assert!(
-        said.contains(&(
-            "/dev/vda1".to_string(),
-            "/boot/efi".to_string(),
-            "fat32".to_string()
-        )),
-        "{said:?}"
-    );
-    assert!(
-        said.contains(&(
-            "/dev/vda2".to_string(),
-            "swap".to_string(),
-            "swap".to_string()
-        )),
-        "{said:?}"
-    );
-}
-
-#[test]
 fn the_confirmation_names_every_partition_it_will_remove() {
     let payload = a_payload();
     let answers = Answers {
         disk: "/dev/sda".to_string(),
         hostname: "deb2".to_string(),
-        user: "tect".to_string(),
+        user: "buildc".to_string(),
         password: "hunter2".to_string(),
         opened: Opened::Keep,
         encryption: Encryption {
@@ -133,7 +67,6 @@ fn the_confirmation_names_every_partition_it_will_remove() {
             passphrase: String::new(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: Some(CustomLayout {
             disk: "/dev/sda".to_string(),
             deletes: vec![
@@ -175,7 +108,7 @@ fn the_confirmation_names_every_partition_it_will_remove() {
             "{device} is not on the screen:\n{flat}"
         );
     }
-    assert_eq!(flat.matches("DELETED").count(), 3, "{flat}");
+    assert_eq!(flat.matches("contents are lost").count(), 3, "{flat}");
     assert!(
         flat.contains(&copy::summary_esp("fedora", "/dev/sda1")),
         "{flat}"
@@ -183,38 +116,42 @@ fn the_confirmation_names_every_partition_it_will_remove() {
     assert!(flat.contains("400 GB"), "{flat}");
     assert!(flat.contains("/boot/efi"), "{flat}");
     let asked = copy::removing_partitions("/dev/sda", 3);
-    assert!(asked.contains('3') && asked.contains("DELETE"), "{asked}");
-    assert!(copy::removing_partitions("/dev/sda", 1).starts_with("DELETE 1 partition "));
+    assert!(asked.contains('3') && asked.contains("Delete"), "{asked}");
+    assert!(copy::removing_partitions("/dev/sda", 1).starts_with("Delete 1 partition "));
 }
 
 #[test]
-fn the_completed_recipe_carries_the_pin() {
-    let root = scratch("complete-pin");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
+fn the_confirmation_names_the_format_inside_an_opened_root() {
+    let payload = a_payload();
     let answers = Answers {
-        disk: "/dev/vda".to_string(),
+        disk: "/dev/sda".to_string(),
         hostname: "deb2".to_string(),
-        user: "tect".to_string(),
+        user: "buildc".to_string(),
         password: "hunter2".to_string(),
         opened: Opened::Keep,
         encryption: Encryption {
-            kind: "tpm2-luks-pin".to_string(),
+            kind: NONE.to_string(),
             passphrase: String::new(),
-            pin: "4321".to_string(),
+            pin: String::new(),
         },
-        data: Data::default(),
-        layout: None,
+        layout: Some(CustomLayout {
+            disk: "/dev/sda".to_string(),
+            opens: vec![LuksOpen {
+                partition: "/dev/sda3".to_string(),
+                target: "/".to_string(),
+                key: Key::Passphrase("opensesame".to_string()),
+            }],
+            ..Default::default()
+        }),
     };
-    let done = complete(&recipe, &answers).expect("the person's half goes in");
-    let encryption = json::field(&done, "encryption").expect("an encryption");
-    assert_eq!(
-        json::text(encryption, "type").as_deref(),
-        Some("tpm2-luks-pin")
+    let said = answers.summary(&payload);
+    assert!(
+        said.contains(&(
+            "/".to_string(),
+            copy::opened_root("/dev/sda3", &payload.filesystem, copy::BOOT_PASSPHRASE)
+        )),
+        "{said:?}"
     );
-    assert_eq!(json::text(encryption, "pin").as_deref(), Some("4321"));
-    assert_eq!(json::text(encryption, "passphrase").as_deref(), Some(""));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -264,143 +201,11 @@ fn custom_layouts_need_one_root_and_unique_mount_points() {
 }
 
 #[test]
-fn an_opened_container_reaches_fisherman_as_its_mapper() {
-    let root = scratch("opened-layout");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(CustomLayout {
-            disk: "/dev/vda".to_string(),
-            mounts: vec![CustomMount {
-                partition: "/dev/vda1".to_string(),
-                target: "/boot/efi".to_string(),
-                fstype: "unformatted".to_string(),
-
-                passphrase: String::new(),
-            }],
-            opens: vec![
-                LuksOpen {
-                    partition: "/dev/vda2".to_string(),
-                    target: "/".to_string(),
-                    key: Key::Passphrase("opensesame".to_string()),
-                },
-                LuksOpen {
-                    partition: "/dev/vda3".to_string(),
-                    target: "/var".to_string(),
-                    key: Key::File(PathBuf::from("/run/keyfile")),
-                },
-            ],
-            ..Default::default()
-        }),
-    };
-    let done = complete(&recipe, &answers).expect("a custom recipe");
-    let mounts = json::items(&done, "customMounts");
-    assert_eq!(mounts.len(), 3);
-    assert_eq!(
-        json::text(&mounts[1], "partition").as_deref(),
-        Some("/dev/mapper/tect-1")
-    );
-    assert_eq!(json::text(&mounts[1], "target").as_deref(), Some("/"));
-    assert_eq!(
-        json::text(&mounts[1], "fstype").as_deref(),
-        Some("unformatted")
-    );
-    assert_eq!(
-        json::text(&mounts[2], "partition").as_deref(),
-        Some("/dev/mapper/tect-2")
-    );
-    assert_eq!(json::text(&mounts[2], "target").as_deref(), Some("/var"));
-    let said = done.render();
-    for secret in ["/dev/vda2", "/dev/vda3", "opensesame", "/run/keyfile"] {
-        assert!(!said.contains(secret), "{secret} reached the recipe");
-    }
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn a_passphrase_never_reads_back_out_of_a_key() {
     let said = format!("{:?}", Key::Passphrase("opensesame".to_string()));
     assert!(!said.contains("opensesame"), "{said}");
     let said = format!("{:?}", Key::Data(b"opensesame".to_vec()));
     assert!(!said.contains("opensesame"), "{said}");
-}
-
-#[test]
-fn a_custom_layout_is_the_recipe_fisherman_takes() {
-    let root = scratch("custom-layout");
-    let recipe = root.join(RECIPE);
-    let emitted = EMITTED.replace(
-        "\"user\": { \"groups\": [\"sudo\"] },",
-        "\"user\": { \"groups\": [\"sudo\"] },\n  \"varDisk\": { \"size\": \"20 GB\" },",
-    );
-    std::fs::write(&recipe, emitted).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(CustomLayout {
-            disk: "/dev/vda".to_string(),
-            mounts: vec![
-                CustomMount {
-                    partition: "/dev/vda1".to_string(),
-                    target: "/boot/efi".to_string(),
-                    fstype: "unformatted".to_string(),
-
-                    passphrase: String::new(),
-                },
-                CustomMount {
-                    partition: "/dev/vda2".to_string(),
-                    target: "/".to_string(),
-                    fstype: "ext4".to_string(),
-
-                    passphrase: String::new(),
-                },
-                CustomMount {
-                    partition: "/dev/vda3".to_string(),
-                    target: "/swap".to_string(),
-                    fstype: "swap".to_string(),
-
-                    passphrase: String::new(),
-                },
-            ],
-            opens: Vec::new(),
-            ..Default::default()
-        }),
-    };
-    let done = complete(&recipe, &answers).expect("a custom recipe");
-    let mounts = json::items(&done, "customMounts");
-    assert_eq!(mounts.len(), 3);
-    assert_eq!(
-        json::text(&mounts[0], "partition").as_deref(),
-        Some("/dev/vda1")
-    );
-    assert_eq!(
-        json::text(&mounts[0], "fstype").as_deref(),
-        Some("unformatted")
-    );
-    assert_eq!(json::text(&mounts[1], "target").as_deref(), Some("/"));
-    assert_eq!(json::text(&mounts[2], "target").as_deref(), Some("swap"));
-    assert!(json::field(&done, "varDisk").is_none());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -455,9 +260,9 @@ fn the_opened_rows_answer_reads_back() {
 #[test]
 fn a_headless_run_refuses_a_disk_it_cannot_read() {
     let given = Given {
-        disk: Some("/nonexistent/tect-none".to_string()),
+        disk: Some("/nonexistent/buildc-none".to_string()),
         hostname: Some("deb2".to_string()),
-        user: Some("tect".to_string()),
+        user: Some("buildc".to_string()),
         password: Some("hunter2".to_string()),
         ..Default::default()
     };

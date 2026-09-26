@@ -14,11 +14,20 @@ pub const NO_TPM: &str = "No TPM available";
 pub const NO_LUKS_INITRAMFS: &str = "the image has not declared and proved `luks-initramfs`";
 pub const REMOVABLE: &str = "removable";
 
-pub const DATA_TOGETHER: &str = "System and Home on same partition";
-pub const DATA_SEPARATE: &str = "Separate Home partition";
-pub const DATA_ENCRYPTED: &str = "encrypted with the root's passphrase";
+pub const NO_ROOT_FILESYSTEM: &str =
+    "the recipe names no `filesystem`, and the whole-disk layout formats the root with it";
+
+pub fn unknown_bootloader(bootloader: &str) -> String {
+    format!("the recipe's `bootloader` is {bootloader:?}; the installer lays out a disk for `grub2` or `systemd`")
+}
+
+pub fn unformattable(fstype: &str, target: &str) -> String {
+    format!("{target} cannot be formatted as {fstype:?}; the installer writes btrfs, ext4, xfs and fat32")
+}
+
 pub const CUSTOM_ROOT: &str = "still needs a / partition";
 pub const CUSTOM_ESP: &str = "still needs a /boot/efi partition";
+pub const CUSTOM_ROOT_KEPT: &str = "the / partition must be formatted";
 pub const CUSTOM_LUKS_LATER: &str = "manual LUKS is not installed yet; use the whole disk";
 pub const CUSTOM_VERITY: &str = "the image needs fs-verity: format the root ext4 or btrfs";
 pub const INSTALLATION_DISK: &str = "installation disk";
@@ -27,6 +36,20 @@ pub const CUSTOM_UNMOUNTED: &str = "a partition is answered with no mount point"
 pub const CUSTOM_UNFORMATTED: &str = "a new partition has no filesystem chosen";
 pub fn table_already_changed(disk: &str) -> String {
     format!("the partition table on {disk} has already been changed")
+}
+
+pub fn no_mkfs(program: &str, fstype: &str) -> String {
+    format!("this live environment has no {program}, so it cannot format {fstype}")
+}
+
+pub fn root_type_needs_gpt(disk: &str) -> String {
+    format!(
+        "{disk} needs a GPT partition table, because this image finds its root by partition type"
+    )
+}
+
+pub fn account_name(user: &str) -> String {
+    format!("the username {user:?} needs lowercase letters, digits, `_` or `-`, starting with a letter or `_`")
 }
 
 pub fn table_changed(disk: &str) -> String {
@@ -57,6 +80,10 @@ pub fn custom_too_big(gb: u64) -> String {
 
 pub fn opened(partition: &str, how: &str) -> String {
     format!("{partition}  {how}")
+}
+
+pub fn opened_root(partition: &str, fstype: &str, how: &str) -> String {
+    format!("{partition}  format as {fstype} inside, {how}")
 }
 
 pub const OPENED_KEEP: &str = "keep what is enrolled";
@@ -111,14 +138,22 @@ pub const ENROLLING: &str = "enrolling disk auto-unlock; this takes a few second
 
 pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 
-pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String {
-    let enroll = match pcr_policy {
-        true => {
-            "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
+pub fn tpm2_unit(name: &str, key: &str, pin: Option<&str>, uuid: &str, pcr_policy: bool) -> String {
+    let mut enroll = match pcr_policy {
+        true => "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
                  --tpm2-signature=/run/systemd/tpm2-pcr-signature.json"
-        }
-        false => "--tpm2-pcrs=7",
+            .to_string(),
+        false => "--tpm2-pcrs=7".to_string(),
     };
+    if pin.is_some() {
+        enroll.push_str(" --tpm2-with-pin=yes");
+    }
+    let pin_credential = pin
+        .map(|path| format!("LoadCredential=cryptenroll.new-tpm2-pin:{path}\n"))
+        .unwrap_or_default();
+    let shred_pin = pin
+        .map(|path| format!("ExecStartPost=-/usr/bin/shred -u {path}\n"))
+        .unwrap_or_default();
     let credential = format!("{}/{}.cred", crate::CREDENTIAL_DIR, crate::CREDENTIAL);
     let marker = format!("{}/{}", crate::CREDENTIAL_DIR, crate::SLOT_FILE);
     let script = format!(
@@ -163,9 +198,11 @@ pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String 
          TimeoutStartSec=120\n\
          StandardOutput=journal+console\n\
          StandardError=journal+console\n\
+         {pin_credential}\
          ExecStartPre=/bin/echo '{ENROLLING}'\n\
          ExecStart=/bin/bash -c '{script}'\n\
          ExecStartPost=-/usr/bin/shred -u {key}\n\
+         {shred_pin}\
          ExecStartPost=-/usr/bin/systemctl disable tect-tpm2-enroll-{name}.service\n\
          \n\
          [Install]\n\
@@ -314,8 +351,8 @@ pub const LUKS_OPEN: &str = "luks(open)";
 pub const LUKS_CLOSED: &str = "luks(closed)";
 pub const EFI_CELL: &str = "efi";
 
-pub fn mount_points() -> [&'static str; 6] {
-    ["/boot/efi", "/", "/boot", "/var", "/var/home", "/swap"]
+pub fn mount_points() -> [&'static str; 4] {
+    ["/boot/efi", "/", "/boot", "/swap"]
 }
 
 pub fn format_options() -> [&'static str; 5] {
@@ -355,37 +392,16 @@ pub fn size_said(size: &str) -> String {
     format!("{:.1} GB", bytes / 1_000_000_000.0)
 }
 
-pub fn home_too_small(size: &str) -> String {
-    format!("{size} is below the 1.0 GB home minimum; keep system and home together")
-}
-
 pub fn custom_root_too_small(gb: u64, reserve: u64) -> String {
     format!("a {gb} GB root is below the {reserve} GB this image needs")
 }
 
-pub fn home_too_big(size: &str, disk: &str) -> String {
-    format!("{size} of home leaves no room for the system on the {disk} disk; keep system and home together")
-}
-
-pub fn written_over(
-    bootloader: &str,
-    filesystem: &str,
-    var: &str,
-    encrypted: bool,
-) -> Vec<(String, String)> {
-    let mut rows = vec![("esp".to_string(), format!("{}  fat32", size_said("2")))];
+pub fn written_over(bootloader: &str, filesystem: &str) -> Vec<(String, String)> {
+    let esp = crate::ESP_GB.to_string();
+    let mut rows = vec![("esp".to_string(), format!("{}  fat32", size_said(&esp)))];
     if bootloader != "systemd" {
-        rows.push(("/boot".to_string(), format!("{}  ext4", size_said("2"))));
-    }
-    if !var.is_empty() {
-        let size = size_said(var);
-        rows.push((
-            "home".to_string(),
-            match encrypted {
-                true => format!("{size}  {filesystem}  {DATA_ENCRYPTED}"),
-                false => format!("{size}  {filesystem}"),
-            },
-        ));
+        let boot = crate::BOOT_GB.to_string();
+        rows.push(("/boot".to_string(), format!("{}  ext4", size_said(&boot))));
     }
     rows.push(("root".to_string(), format!("the rest  {filesystem}")));
     rows
@@ -398,8 +414,6 @@ pub const ROW_PASSWORD: &str = "password";
 pub const ROW_ENCRYPTION: &str = "encryption";
 pub const ROW_PASSPHRASE: &str = "passphrase";
 pub const ROW_PIN: &str = "PIN";
-pub const ROW_DATA: &str = "home directory";
-pub const ROW_SIZE: &str = "size";
 pub const PASSWORD_SET: &str = "set";
 pub const NOT_SET: &str = "not set";
 
@@ -533,7 +547,7 @@ mod tests {
     #[test]
     fn uki_chains_are_visible_before_and_after_install() {
         assert!(super::boot_chain("uki-shim").is_some_and(|chain| chain.contains("Microsoft shim")));
-        assert!(!super::written_over("systemd", "ext4", "", false)
+        assert!(!super::written_over("systemd", "ext4")
             .iter()
             .any(|(name, _)| name == "boot chain"));
         assert!(super::next_steps_setup().contains("setup mode"));
@@ -546,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_pcr_policy_tpm2_unit_names_the_embedded_files() {
-        let policy = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", true);
+        let policy = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", true);
         assert!(policy.contains("--tpm2-pcrs=7"), "{policy}");
         assert!(
             policy.contains("--tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem"),
@@ -556,14 +570,16 @@ mod tests {
             policy.contains("--tpm2-signature=/run/systemd/tpm2-pcr-signature.json"),
             "{policy}"
         );
-        let other = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", false);
+        let other = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
         assert!(other.contains("--tpm2-pcrs=7"), "{other}");
         assert!(!other.contains("tpm2-pcr-public-key"), "{other}");
+        assert!(!other.contains("tpm2-with-pin"), "{other}");
+        assert!(!other.contains("new-tpm2-pin"), "{other}");
     }
 
     #[test]
     fn a_tpm2_unit_runs_before_any_login_and_says_so() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", false);
+        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
         assert!(
             unit.contains("Before=systemd-user-sessions.service"),
             "{unit}"
@@ -584,7 +600,7 @@ mod tests {
 
     #[test]
     fn a_tpm2_unit_cleans_up_an_automatic_finalize() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "abcd", true);
+        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "abcd", true);
         assert!(unit.contains(&format!("\"{}\"", super::ESP_TYPE)), "{unit}");
         assert!(
             unit.contains("loader/credentials/cryptsetup.slot"),
@@ -608,20 +624,22 @@ mod tests {
     }
 
     #[test]
-    fn a_created_var_says_when_it_is_encrypted() {
-        let var = |encrypted: bool| {
-            super::written_over("grub2", "ext4", "200 GB", encrypted)
-                .into_iter()
-                .find(|(name, _)| name == "home")
-                .expect("a home row")
-                .1
-        };
-        assert!(var(true).contains(super::DATA_ENCRYPTED), "{}", var(true));
-        assert!(
-            !var(false).contains(super::DATA_ENCRYPTED),
-            "{}",
-            var(false)
+    fn a_pin_unit_loads_and_shreds_the_pin() {
+        let unit = super::tpm2_unit(
+            "root",
+            "/etc/tect/tpm2-enroll-root.key",
+            Some("/etc/tect/tpm2-enroll-root.pin"),
+            "abcd",
+            false,
         );
-        assert!(super::DATA_ENCRYPTED.chars().count() < 60);
+        assert!(unit.contains("--tpm2-with-pin=yes"), "{unit}");
+        assert!(
+            unit.contains("LoadCredential=cryptenroll.new-tpm2-pin:/etc/tect/tpm2-enroll-root.pin"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("ExecStartPost=-/usr/bin/shred -u /etc/tect/tpm2-enroll-root.pin"),
+            "{unit}"
+        );
     }
 }

@@ -29,7 +29,7 @@ impl Answers {
             _ => chosen,
         };
         let mut layout: Option<CustomLayout> = None;
-        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref(), "");
+        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref());
         let panel = panel(payload);
         let mut cursor: Option<usize> = None;
         let mut reopen_on_table = false;
@@ -51,18 +51,11 @@ impl Answers {
                 true => Some(scan.table(&disk)?),
                 false => None,
             };
-            let separate = fields[ROW_DATA].value() == copy::DATA_SEPARATE;
-            let size = match separate {
-                true => fields[ROW_SIZE].value(),
-                false => String::new(),
-            };
             let table = layout_table(
                 &scan,
                 &disk,
                 layout.as_ref(),
                 payload,
-                &size,
-                separate,
                 kind != NONE,
             );
             let at = match cursor {
@@ -353,9 +346,13 @@ impl Answers {
                                             copy::UNASSIGN => {
                                                 place_unassign(&mut layout, partition)
                                             }
-                                            _ => {
-                                                place_target(&mut layout, &disk, partition, target)
-                                            }
+                                            _ => place_target(
+                                                &mut layout,
+                                                &disk,
+                                                partition,
+                                                target,
+                                                &payload.filesystem,
+                                            ),
                                         }
                                     }
                                 }
@@ -521,7 +518,7 @@ impl Answers {
                         start = 0;
                         left.clear();
                         fields = Self::seeded(payload, Given::default(), prompt)?
-                            .fields(payload, &scan, &disk, None, "")
+                            .fields(payload, &scan, &disk, None)
                     }
                     Leave::Back => {}
                 },
@@ -535,7 +532,7 @@ impl Answers {
                         start = 0;
                         left.clear();
                         fields = Self::seeded(payload, Given::default(), prompt)?
-                            .fields(payload, &scan, &disk, None, "")
+                            .fields(payload, &scan, &disk, None)
                     }
                     Leave::Back => {}
                 },
@@ -571,7 +568,6 @@ impl Answers {
                     tpm().exists(),
                     payload.luks_initramfs,
                 )?,
-                data: Data::default(),
                 layout: None,
                 opened: Opened::Keep,
             });
@@ -589,7 +585,6 @@ impl Answers {
                 passphrase: given.passphrase.unwrap_or_default(),
                 pin: given.pin.unwrap_or_default(),
             },
-            data: Data::default(),
             layout: None,
             opened: Opened::Keep,
         })
@@ -601,18 +596,9 @@ impl Answers {
         scan: &Scan,
         disk: &str,
         layout: Option<&CustomLayout>,
-        var_size: &str,
     ) -> Vec<common::ui::Field> {
         use common::ui::Field;
-        let table = layout_table(
-            scan,
-            disk,
-            layout,
-            payload,
-            var_size,
-            !self.data.size.is_empty(),
-            self.encryption.kind != NONE,
-        );
+        let table = layout_table(scan, disk, layout, payload, self.encryption.kind != NONE);
         vec![
             Field::text(copy::ROW_HOSTNAME, &self.hostname),
             Field::text(copy::ROW_ACCOUNT, &self.user),
@@ -631,12 +617,6 @@ impl Answers {
                 &Field::action(copy::ROW_ENCRYPTION, shown(&self.encryption.kind)),
                 tpm().exists(),
                 payload.luks_initramfs,
-            ),
-            Field::pick_change(copy::ROW_DATA, data_rows(payload.composefs), Some(0)),
-            Field::measure(
-                &format!("\u{2514}\u{2500} {}", copy::ROW_SIZE),
-                &self.data.size,
-                "GB",
             ),
             table.field(0, !disk.is_empty(), false),
             Field::secret(copy::ROW_PASSPHRASE, &self.encryption.passphrase),
@@ -679,10 +659,6 @@ impl Answers {
                     }
                 }
             },
-            data: match manual {
-                true => Data::default(),
-                false => chose(&at(ROW_DATA), &at(ROW_SIZE)),
-            },
             opened: match manual {
                 true if opens => Opened::of(&at(ROW_ENCRYPTION)),
                 _ => Opened::Keep,
@@ -705,9 +681,6 @@ impl Answers {
                 shown(&self.encryption.kind).to_string(),
             ),
         ];
-        if self.layout.is_none() {
-            rows.push((copy::ROW_DATA.to_string(), data_said(&self.data)));
-        }
         match &self.layout {
             Some(layout) => {
                 rows.extend(
@@ -737,21 +710,18 @@ impl Answers {
                     (mount.target.clone(), how)
                 }));
                 rows.extend(layout.opens.iter().map(|open| {
-                    (
-                        open.target.clone(),
-                        copy::opened(&open.partition, at_boot(open, self.opened)),
-                    )
+                    let how = at_boot(open, self.opened);
+                    let said = match open.target.as_str() {
+                        "/" => copy::opened_root(&open.partition, &payload.filesystem, how),
+                        _ => copy::opened(&open.partition, how),
+                    };
+                    (open.target.clone(), said)
                 }));
                 if let Some(chain) = copy::boot_chain(&payload.boot) {
                     rows.push(("boot chain".to_string(), chain.to_string()));
                 }
             }
-            None => rows.extend(copy::written_over(
-                &payload.bootloader,
-                &payload.filesystem,
-                &self.data.size,
-                self.encryption.kind != NONE,
-            )),
+            None => rows.extend(copy::written_over(&payload.bootloader, &payload.filesystem)),
         }
         rows
     }

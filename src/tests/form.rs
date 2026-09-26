@@ -84,8 +84,6 @@ fn the_whole_disk_form_refuses_a_seeded_tpm2_kind_without_a_tpm() {
             vec![Choice::new(shown("tpm2-luks"), "")],
             Some(0),
         ),
-        Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-        Field::text(copy::ROW_SIZE, ""),
         Field::table(
             "disk",
             "disk",
@@ -131,8 +129,6 @@ fn the_whole_disk_form_refuses_a_seeded_pin_kind_with_no_pin() {
             vec![Choice::new(shown("tpm2-luks-pin"), "")],
             Some(0),
         ),
-        Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-        Field::text(copy::ROW_SIZE, ""),
         Field::table(
             "disk",
             "disk",
@@ -167,12 +163,12 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
             passphrase: String::new(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: None,
     };
     assert_eq!(
         answers.summary(&Payload {
             recipe: "/mnt/tect/install-recipe.json".into(),
+            install: an_install_recipe(),
             image: "ghcr.io/buildc-org/deb2:latest".to_string(),
             hostname: "deb2".to_string(),
             filesystem: "ext4".to_string(),
@@ -192,7 +188,6 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
                 copy::PASSWORD_SET.to_string()
             ),
             (copy::ROW_ENCRYPTION.to_string(), copy::ENC_NONE.to_string()),
-            (copy::ROW_DATA.to_string(), copy::DATA_TOGETHER.to_string()),
             ("esp".to_string(), "2.0 GB  fat32".to_string()),
             ("/boot".to_string(), "2.0 GB  ext4".to_string()),
             ("root".to_string(), "the rest  ext4".to_string()),
@@ -204,79 +199,6 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
         "{question}"
     );
     assert!(!question.contains("hunter2"));
-}
-
-#[test]
-fn a_home_size_the_disk_cannot_hold_is_refused() {
-    use common::ui::{Cell, Choice, Field};
-    let disk = |answered: bool| {
-        let name = match answered {
-            true => Cell::set("\u{25c9} QEMU HARDDISK (/dev/vda)"),
-            false => Cell::new("\u{25c9} QEMU HARDDISK (/dev/vda)"),
-        };
-        let row = vec![
-            name,
-            Cell::new("68.7 GB"),
-            Cell::new(""),
-            Cell::new(""),
-            Cell::new(""),
-            Cell::new(""),
-        ];
-        Field::table(
-            copy::DISK_SELECTION,
-            copy::ROW_DISK,
-            &copy::layout_headings(),
-            &[],
-            vec![row],
-            vec![true],
-            vec![Vec::new()],
-            0,
-            false,
-            answered,
-        )
-    };
-    let form = |size: &str| {
-        vec![
-            Field::text(copy::ROW_HOSTNAME, "deb2"),
-            Field::text(copy::ROW_ACCOUNT, "tect"),
-            Field::secret(copy::ROW_PASSWORD, "hunter2"),
-            Field::secret(copy::ROW_CONFIRM, "hunter2"),
-            Field::pick(
-                copy::ROW_LAYOUT,
-                vec![
-                    Choice::new(copy::LAYOUT_WHOLE, ""),
-                    Choice::new(copy::LAYOUT_MANUAL, ""),
-                ],
-                Some(0),
-            ),
-            Field::action(copy::ROW_ENCRYPTION, shown(NONE)),
-            Field::pick(
-                copy::ROW_DATA,
-                vec![Choice::new(copy::DATA_SEPARATE, "")],
-                Some(0),
-            ),
-            Field::measure(copy::ROW_SIZE, size, "GB"),
-            disk(true),
-            Field::secret(copy::ROW_PASSPHRASE, ""),
-        ]
-    };
-    assert!(short_of(&form("40"), "/dev/vda", None, &a_payload(), true, None).is_none());
-    assert_eq!(
-        short_of(&form("0"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_small("0.0 GB").as_str())
-    );
-    assert_eq!(
-        short_of(&form("500"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_big("500.0 GB", "68.7 GB").as_str())
-    );
-    assert_eq!(
-        short_of(&form("65"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_big("65.0 GB", "68.7 GB").as_str())
-    );
-    let mut unchosen = form("500");
-    unchosen[ROW_TABLE] = disk(false);
-    let said = short_of(&unchosen, "", None, &a_payload(), true, None).unwrap_or_default();
-    assert!(said.contains(copy::INSTALLATION_DISK), "{said}");
 }
 
 #[test]
@@ -297,8 +219,6 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
                 Some(usize::from(manual)),
             ),
             encryption,
-            Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-            Field::text(copy::ROW_SIZE, ""),
             Field::table(
                 "disk",
                 "disk",
@@ -318,18 +238,9 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
     for kind in [NONE, "tpm2-luks", "luks-passphrase", "tpm2-luks-passphrase"] {
         assert!(!asked(&form(false, kinds(kind))).contains(&ROW_PASSPHRASE));
     }
-    let mut sized = form(false, kinds(NONE));
-    assert!(!asked(&sized).contains(&ROW_SIZE));
-    sized[ROW_DATA] = Field::pick(
-        copy::ROW_DATA,
-        vec![Choice::new(copy::DATA_SEPARATE, "")],
-        Some(0),
-    );
-    assert!(asked(&sized).contains(&ROW_SIZE));
-    assert_eq!(asked(&form(false, kinds(NONE))).len(), 8);
+    assert_eq!(asked(&form(false, kinds(NONE))).len(), 7);
     let bare = asked(&form(true, kinds(NONE)));
     assert!(!bare.contains(&ROW_ENCRYPTION));
-    assert!(!bare.contains(&ROW_DATA) && !bare.contains(&ROW_SIZE));
     assert!(bare.contains(&ROW_TABLE));
     let opened = Field::pick(
         copy::ROW_ENCRYPTION,
@@ -361,8 +272,6 @@ fn the_action_says_what_the_form_is_short_of() {
                 vec![Choice::new(shown(kind), "")],
                 Some(0),
             ),
-            Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-            Field::text(copy::ROW_SIZE, ""),
             Field::table(
                 "disk",
                 "disk",
@@ -448,22 +357,6 @@ fn the_action_says_what_the_form_is_short_of() {
         short.contains(copy::ROW_ACCOUNT) && short.contains(copy::ROW_PASSWORD),
         "{short}"
     );
-
-    let data = |form: &mut Vec<common::ui::Field>, label: String, size: &str| {
-        form[ROW_DATA] = Field::pick(copy::ROW_DATA, vec![Choice::new(label, "")], Some(0));
-        form[ROW_SIZE] = Field::text(copy::ROW_SIZE, size);
-    };
-    let mut sized = form("hunter2", "hunter2", NONE, "");
-    data(&mut sized, copy::DATA_SEPARATE.to_string(), "");
-    assert!(short_of(&sized, "/dev/vda", None, &a_payload(), true, None)
-        .unwrap()
-        .contains(copy::ROW_SIZE));
-    data(&mut sized, copy::DATA_SEPARATE.to_string(), "200 GB");
-    assert!(short_of(&sized, "/dev/vda", None, &a_payload(), true, None).is_none());
-
-    let mut encrypted = form("hunter2", "hunter2", "tpm2-luks", "");
-    data(&mut encrypted, copy::DATA_SEPARATE.to_string(), "200 GB");
-    assert!(short_of(&encrypted, "/dev/vda", None, &a_payload(), true, None).is_none());
 
     let root_keyfile = CustomLayout {
         disk: "/dev/vda".to_string(),

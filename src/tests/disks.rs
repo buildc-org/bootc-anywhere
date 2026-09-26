@@ -12,15 +12,12 @@ fn the_luks_window_opens_on_the_kind_in_its_own_list() {
 }
 
 #[test]
-fn every_shown_description_is_written_as_the_name_fisherman_takes() {
-    let root = scratch("kinds");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
+fn every_shown_description_is_read_as_the_installer_kind() {
     for (name, label, _) in KINDS {
         let answers = Answers {
             disk: "/dev/vda".to_string(),
             hostname: "deb2".to_string(),
-            user: "tect".to_string(),
+            user: "buildc".to_string(),
             password: "hunter2".to_string(),
             opened: Opened::Keep,
             encryption: Encryption {
@@ -28,16 +25,13 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
                 passphrase: "opensesame".to_string(),
                 pin: "4321".to_string(),
             },
-            data: Data::default(),
             layout: None,
         };
-        let fields = answers.fields(&a_payload(), &Scan::default(), "/dev/vda", None, "");
+        let fields = answers.fields(&a_payload(), &Scan::default(), "/dev/vda", None);
         assert_eq!(fields[ROW_ENCRYPTION].value(), label);
         let read = Answers::of(&fields, "/dev/vda".to_string(), None);
         assert_eq!(read.encryption.kind, name);
-        let done = complete(&recipe, &read).expect("a completed recipe");
-        let encryption = json::field(&done, "encryption").expect("an encryption");
-        assert_eq!(json::text(encryption, "type").as_deref(), Some(name));
+        assert_eq!(read.encryption.kind, name);
         assert_eq!(shown(name), label);
         let flagged = ask_encryption(
             Some(name.to_string()),
@@ -50,69 +44,6 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
         .expect("one of the five");
         assert_eq!(flagged.kind, name);
     }
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn the_home_row_offers_together_or_a_partition_of_its_own() {
-    let rows = data_rows(false);
-    let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
-    assert_eq!(labels, [copy::DATA_TOGETHER, copy::DATA_SEPARATE]);
-    assert!(rows.iter().all(|row| row.available));
-    assert!(chose(copy::DATA_TOGETHER, "20 GB").size.is_empty());
-    assert_eq!(chose(copy::DATA_SEPARATE, "20 GB").size, "20 GB");
-    assert_eq!(data_said(&Data::default()), copy::DATA_TOGETHER);
-    assert_eq!(
-        data_said(&Data {
-            size: "20 GB".to_string()
-        }),
-        copy::DATA_SEPARATE
-    );
-    let locked = data_rows(true);
-    assert_eq!(locked[0].label, copy::DATA_TOGETHER);
-    assert!(!locked[0].hidden);
-    assert_eq!(locked[1].label, copy::DATA_SEPARATE);
-    assert!(locked[1].hidden);
-}
-
-#[test]
-fn a_separate_home_writes_a_size_and_sharing_the_root_writes_nothing() {
-    let root = scratch("var");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let written = |data: Data, kind: &str| {
-        let answers = Answers {
-            disk: "/dev/vda".to_string(),
-            hostname: "deb2".to_string(),
-            user: "tect".to_string(),
-            password: "hunter2".to_string(),
-            opened: Opened::Keep,
-            encryption: Encryption {
-                kind: kind.to_string(),
-                passphrase: String::new(),
-                pin: String::new(),
-            },
-            data,
-            layout: None,
-        };
-        complete(&recipe, &answers).expect("a completed recipe")
-    };
-    let held = |doc: &Json, key: &str| {
-        json::field(doc, "varDisk")
-            .and_then(|var| json::field(var, key))
-            .map(|value| value.render().trim().to_string())
-    };
-
-    let sized = written(chose(copy::DATA_SEPARATE, "200 GB"), NONE);
-    assert_eq!(held(&sized, "size").as_deref(), Some("\"200GB\""));
-    assert_eq!(held(&sized, "encrypt"), None);
-
-    let encrypted = written(chose(copy::DATA_SEPARATE, "200 GB"), "luks-passphrase");
-    assert_eq!(held(&encrypted, "encrypt").as_deref(), Some("true"));
-
-    assert!(json::field(&written(Data::default(), NONE), "varDisk").is_none());
-    assert!(json::field(&written(Data::default(), "tpm2-luks"), "varDisk").is_none());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -287,9 +218,9 @@ fn a_key_on_the_root_needs_an_encrypted_root() {
                 passphrase: String::new(),
             }],
         };
-        let mut opens = vec![volume("/var", "/dev/tect-test-no-luks")];
+        let mut opens = vec![volume("/var", "/dev/buildc-test-no-luks")];
         if encrypted_root {
-            opens.insert(0, volume("/", "/dev/tect-test-no-luks-root"));
+            opens.insert(0, volume("/", "/dev/buildc-test-no-luks-root"));
         }
         CustomLayout {
             disk: "/dev/vda".to_string(),
@@ -317,45 +248,4 @@ fn a_key_on_the_root_needs_an_encrypted_root() {
     assert!(row(&encrypted, copy::OPENED_KEEP)
         .detail
         .starts_with("its slots could not be read"));
-}
-
-#[test]
-fn the_home_answer_reads_as_together_or_separate() {
-    assert_eq!(data_said(&Data::default()), copy::DATA_TOGETHER);
-    let separate = chose(copy::DATA_SEPARATE, "200 GB");
-    assert_eq!(data_said(&separate), copy::DATA_SEPARATE);
-    assert_eq!(separate.size, "200 GB");
-}
-
-#[test]
-fn a_composefs_target_hides_the_separate_home_answer() {
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: None,
-    };
-    let separate_hidden = |composefs: bool| -> bool {
-        let mut payload = a_payload();
-        payload.composefs = composefs;
-        let fields = answers.fields(&payload, &Scan::default(), "/dev/vda", None, "");
-        let common::ui::Field::Pick { options, .. } = &fields[ROW_DATA] else {
-            panic!("the home row is a pick");
-        };
-        options
-            .iter()
-            .find(|choice| choice.label == copy::DATA_SEPARATE)
-            .expect("the separate answer keeps its index")
-            .hidden
-    };
-    assert!(separate_hidden(true));
-    assert!(!separate_hidden(false));
 }

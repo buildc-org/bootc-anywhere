@@ -12,6 +12,7 @@ pub fn media() -> PathBuf {
 #[derive(Debug)]
 pub struct Payload {
     pub recipe: PathBuf,
+    pub(crate) install: InstallRecipe,
     pub image: String,
     pub hostname: String,
     pub filesystem: String,
@@ -106,29 +107,19 @@ impl Found {
 pub fn classify(root: &Path) -> Result<Found, String> {
     let recipe = root.join(RECIPE);
     if recipe.is_file() {
-        let raw = std::fs::read_to_string(&recipe)
-            .map_err(|err| format!("{}: {err}", recipe.display()))?;
-        let doc = Json::parse(&raw).map_err(|err| format!("{}: {err}", recipe.display()))?;
-        let field = |key: &str| {
-            json::text(&doc, key)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| format!("{}: no `{key}`", recipe.display()))
-        };
-        let told = |key: &str| json::text(&doc, key).unwrap_or_default();
+        let install = InstallRecipe::read(&recipe)?;
         return Ok(Found::Image(Payload {
-            image: field("image")?,
-            hostname: field("hostname")?,
-            filesystem: told("filesystem"),
-            bootloader: told("bootloader"),
-            boot: told("boot"),
-            composefs: matches!(
-                json::field(&doc, "composeFsBackend"),
-                Some(Json::Bool(true))
-            ),
+            image: install.image.clone(),
+            hostname: install.hostname.clone(),
+            filesystem: install.filesystem.clone(),
+            bootloader: install.bootloader.clone(),
+            boot: install.boot.clone(),
+            composefs: install.composefs,
             reserve: std::sync::OnceLock::new(),
-            luks_initramfs: matches!(json::field(&doc, "luksInitramfs"), Some(Json::Bool(true))),
+            luks_initramfs: install.luks_initramfs,
             esp_entries: std::sync::OnceLock::new(),
             recipe,
+            install,
         }));
     }
     Ok(match root.join(crate::REPO_FILE).is_file() {

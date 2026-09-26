@@ -135,8 +135,6 @@ fn named(said: &str) -> Option<String> {
     (!value.is_empty() && !value.contains('$')).then(|| value.to_string())
 }
 
-/// Reads what the loader entries on one filesystem boot, in the order the
-/// search runs: the root's UUID first, then the container the root lives in.
 fn loader_links(at: &Path) -> Vec<Link> {
     for file in loader_files(at) {
         let Ok(text) = std::fs::read_to_string(&file) else {
@@ -274,8 +272,7 @@ pub(crate) fn remove(layout: &CustomLayout) -> Result<(), String> {
         let at = mount_rw(&removal.partition, &mut mounts)?;
         let efi = at.join("EFI");
         for entry in &removal.entries {
-            remove_vendor(&efi, entry)
-                .map_err(|why| format!("{why}\n\n{}", copy::table_already_changed(&layout.disk)))?;
+            remove_vendor(&efi, entry)?;
         }
         mounts.release(&at)?;
     }

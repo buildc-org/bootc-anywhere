@@ -1,8 +1,6 @@
 use super::*;
 use std::io::{Read as _, Write as _};
 
-const ROOT_MOUNT: &str = "/run/tect-root";
-
 pub(crate) const ROOT_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
 
 struct EtcWrite {
@@ -11,29 +9,24 @@ struct EtcWrite {
     pub(crate) mode: u32,
 }
 
-pub(crate) fn arrange(payload: &Payload, answers: &Answers) -> Result<Vec<String>, String> {
-    let Some(layout) = &answers.layout else {
-        return Ok(Vec::new());
-    };
-    if layout.opens.is_empty() {
-        return Ok(Vec::new());
-    }
+pub(crate) fn arrange(
+    payload: &Payload,
+    answers: &Answers,
+    layout: &CustomLayout,
+    password_hash: &str,
+) -> Result<Vec<String>, String> {
     let mut writes: Vec<EtcWrite> = Vec::new();
     let mut crypttab: Vec<(String, String)> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
-    let mut root: Option<(String, String)> = None;
     let encrypted_root = layout.opens_the_root();
-    let pcr_policy = answers.opened == Opened::Tpm2 && pcr_policy_in(&payload.image);
+    let created_tpm = answers.encryption.kind.starts_with("tpm2-");
+    let opened_tpm = answers.opened == Opened::Tpm2;
+    let pcr_policy = (created_tpm || opened_tpm) && pcr_policy_in(&payload.image);
     let planned = (|| {
-        for (mapper, open) in layout.mappers() {
+        for (_, open) in layout.mappers() {
             let uuid = luks_uuid(&open.partition)?;
-            if open.target == "/" {
-                match payload.boot.is_empty() {
-                    true => root = Some((uuid.clone(), "root".to_string())),
-                    false => retag_root(&answers.disk, open, &mapper)?,
-                }
-            } else {
+            if open.target != "/" {
                 if !encrypted_root
                     && (answers.opened != Opened::Keep || !matches!(open.key, Key::Passphrase(_)))
                 {
@@ -47,20 +40,21 @@ pub(crate) fn arrange(payload: &Payload, answers: &Answers) -> Result<Vec<String
                 }
                 crypttab.push((name, line));
             }
-            if answers.opened == Opened::Tpm2 {
+            let created = layout
+                .creates
+                .iter()
+                .any(|create| create.encrypt && create.device == open.partition);
+            if (created && created_tpm) || (!created && opened_tpm) {
                 let name = match open.target.as_str() {
                     "/" => "root".to_string(),
                     target => crypttab_name(target),
                 };
-                stage_tpm2(&name, open, &uuid, pcr_policy, &mut writes)?;
+                let pin = (created && Encryption::wants_pin(&answers.encryption.kind))
+                    .then_some(answers.encryption.pin.as_str());
+                stage_tpm2(&name, open, &uuid, pcr_policy, pin, &mut writes)?;
             }
         }
-        if !writes.is_empty() || !crypttab.is_empty() {
-            write_etc(layout, &writes, &crypttab)?;
-        }
-        if let Some((uuid, name)) = root {
-            inject_luks_args(&answers.disk, &uuid, &name)?;
-        }
+        write_deployment(payload, answers, layout, password_hash, &writes, &crypttab)?;
         Ok(())
     })();
     if let Err(err) = planned {
@@ -143,6 +137,7 @@ fn stage_tpm2(
     open: &LuksOpen,
     uuid: &str,
     pcr_policy: bool,
+    pin: Option<&str>,
     writes: &mut Vec<EtcWrite>,
 ) -> Result<(), String> {
     let key = format!("/etc/tect/tpm2-enroll-{name}.key");
@@ -151,70 +146,92 @@ fn stage_tpm2(
         bytes: key_bytes_of(&open.key)?,
         mode: 0o600,
     });
+    let pin_path = pin.map(|pin| {
+        let path = format!("/etc/tect/tpm2-enroll-{name}.pin");
+        writes.push(EtcWrite {
+            at: path.clone(),
+            bytes: pin.as_bytes().to_vec(),
+            mode: 0o600,
+        });
+        path
+    });
     writes.push(EtcWrite {
         at: format!("/etc/systemd/system/tect-tpm2-enroll-{name}.service"),
-        bytes: copy::tpm2_unit(name, &key, uuid, pcr_policy).into_bytes(),
+        bytes: copy::tpm2_unit(name, &key, pin_path.as_deref(), uuid, pcr_policy).into_bytes(),
         mode: 0o644,
     });
     Ok(())
 }
 
-fn write_etc(
+fn write_deployment(
+    payload: &Payload,
+    answers: &Answers,
     layout: &CustomLayout,
+    password_hash: &str,
     writes: &[EtcWrite],
     crypttab: &[(String, String)],
 ) -> Result<(), String> {
-    let Some(device) = root_device(layout) else {
-        return Err("the layout names no / to write into".to_string());
-    };
-    let at = PathBuf::from(ROOT_MOUNT);
-    std::fs::create_dir_all(&at).map_err(|err| format!("{ROOT_MOUNT}: {err}"))?;
-    let mounted = Command::new("mount")
-        .arg(&device)
-        .arg(&at)
-        .output()
-        .map_err(|err| format!("mount: {err}, and it is what holds the installed root"))?;
-    if !mounted.status.success() {
-        return Err(format!(
-            "mounting {device} at {ROOT_MOUNT}: {}",
-            String::from_utf8_lossy(&mounted.stderr).trim()
-        ));
+    let root = Path::new(SYSROOT);
+    let (deployment, composefs) = deployment(root)?;
+    let etc = deployment.join("etc");
+    let mut changed = configure(
+        root,
+        &deployment,
+        composefs,
+        answers,
+        &payload.install.groups,
+        password_hash,
+    )?;
+    for write in writes {
+        let relative = write
+            .at
+            .strip_prefix("/etc/")
+            .expect("EtcWrite paths live under /etc");
+        let path = etc.join(relative);
+        if let Some(parent) = path.parent().filter(|parent| !parent.exists()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("{}: {err}", parent.display()))?;
+            changed.push(parent.to_path_buf());
+        }
+        std::fs::write(&path, &write.bytes).map_err(|err| format!("{}: {err}", path.display()))?;
+        set_mode(&path, write.mode)?;
+        changed.push(path);
     }
-    let written = (|| {
-        let etc = deployment_etc(&at)?;
-        for write in writes {
-            let path = etc.join(write.at.trim_start_matches('/'));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("{}: {err}", parent.display()))?;
-            }
-            std::fs::write(&path, &write.bytes)
-                .map_err(|err| format!("{}: {err}", path.display()))?;
-            set_mode(&path, write.mode)?;
-        }
+    if !crypttab.is_empty() {
         merge_crypttab(&etc, crypttab)?;
-        for write in writes {
-            let Some(unit) = write.at.rsplit('/').next() else {
-                continue;
-            };
-            if !unit.ends_with(".service") {
-                continue;
-            }
-            let wants = etc
-                .join("systemd/system/multi-user.target.wants")
-                .join(unit);
-            if let Some(parent) = wants.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("{}: {err}", parent.display()))?;
-            }
-            let _ = std::fs::remove_file(&wants);
-            std::os::unix::fs::symlink(format!("/etc/systemd/system/{unit}"), &wants)
-                .map_err(|err| format!("{}: {err}", wants.display()))?;
+        changed.push(etc.join("crypttab"));
+    }
+    for write in writes {
+        let Some(unit) = write.at.rsplit('/').next() else {
+            continue;
+        };
+        if !unit.ends_with(".service") {
+            continue;
         }
-        Ok(())
-    })();
-    let _ = Command::new("umount").arg(&at).output();
-    written
+        let wants = etc
+            .join("systemd/system/multi-user.target.wants")
+            .join(unit);
+        if let Some(parent) = wants.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("{}: {err}", parent.display()))?;
+        }
+        match std::fs::remove_file(&wants) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("{}: {err}", wants.display())),
+        }
+        std::os::unix::fs::symlink(format!("/etc/systemd/system/{unit}"), &wants)
+            .map_err(|err| format!("{}: {err}", wants.display()))?;
+        changed.push(wants);
+    }
+    if let Some(device) = swap_device(layout) {
+        let uuid = filesystem_uuid(&device)?;
+        merge_fstab(&etc, &uuid)?;
+        changed.push(etc.join("fstab"));
+    }
+    changed.sort();
+    changed.dedup();
+    label_paths(&deployment, &changed)
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
@@ -223,25 +240,25 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
         .map_err(|err| format!("{}: {err}", path.display()))
 }
 
-pub(crate) fn deployment_etc(root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn deployment(root: &Path) -> Result<(PathBuf, bool), String> {
     let mut found = Vec::new();
     if let Ok(stateroots) = std::fs::read_dir(root.join("ostree/deploy")) {
         for stateroot in stateroots.flatten() {
             if let Ok(deployments) = std::fs::read_dir(stateroot.path().join("deploy")) {
-                for deployment in deployments.flatten() {
-                    let etc = deployment.path().join("etc");
-                    if etc.is_dir() {
-                        found.push(etc);
+                for entry in deployments.flatten() {
+                    let deployment = entry.path();
+                    if deployment.join("etc").is_dir() {
+                        found.push((deployment, false));
                     }
                 }
             }
         }
     }
     if let Ok(deployments) = std::fs::read_dir(root.join("state/deploy")) {
-        for deployment in deployments.flatten() {
-            let etc = deployment.path().join("etc");
-            if etc.is_dir() {
-                found.push(etc);
+        for entry in deployments.flatten() {
+            let deployment = entry.path();
+            if deployment.join("etc").is_dir() {
+                found.push((deployment, true));
             }
         }
     }
@@ -278,22 +295,100 @@ pub(crate) fn merge_crypttab(etc: &Path, lines: &[(String, String)]) -> Result<(
         .map_err(|err| format!("{}: {err}", at.display()))
 }
 
-pub(crate) fn root_device(layout: &CustomLayout) -> Option<String> {
-    if let Some((name, _)) = layout
-        .mappers()
+pub(crate) fn swap_device(layout: &CustomLayout) -> Option<String> {
+    volumes(layout, "")
         .into_iter()
-        .find(|(_, open)| open.target == "/")
-    {
-        return Some(mapper_path(&name));
-    }
-    layout
-        .mounts
-        .iter()
-        .find(|mount| mount.target == "/")
-        .map(|mount| mount.partition.clone())
+        .find(|volume| volume.target == "/swap")
+        .map(|volume| volume.device)
 }
 
-fn luks_uuid(partition: &str) -> Result<String, String> {
+fn filesystem_uuid(device: &str) -> Result<String, String> {
+    let out = Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value", device])
+        .output()
+        .map_err(|err| format!("blkid: {err}, and it is what names swap {device}"))?;
+    let uuid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match out.status.success() && !uuid.is_empty() {
+        true => Ok(uuid),
+        false => Err(format!(
+            "blkid could not name swap {device}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn merge_fstab(etc: &Path, uuid: &str) -> Result<(), String> {
+    let at = etc.join("fstab");
+    let source = format!("UUID={uuid}");
+    let held = match std::fs::read_to_string(&at) {
+        Ok(held) => held,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("{}: {err}", at.display())),
+    };
+    let mut lines: Vec<&str> = held
+        .lines()
+        .filter(|line| line.split_whitespace().next() != Some(source.as_str()))
+        .collect();
+    let ours = format!("{source} none swap defaults 0 0");
+    lines.push(&ours);
+    std::fs::write(&at, format!("{}\n", lines.join("\n")))
+        .map_err(|err| format!("{}: {err}", at.display()))
+}
+
+pub(crate) fn label_paths(deployment: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    let Some(contexts) = target_contexts(deployment)? else {
+        return Ok(());
+    };
+    let out = Command::new("setfiles")
+        .arg("-r")
+        .arg(deployment)
+        .arg(&contexts)
+        .args(paths)
+        .output()
+        .map_err(|err| format!("setfiles: {err}, and it is what labels the installed system"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "setfiles with {}: {}",
+            contexts.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn target_contexts(deployment: &Path) -> Result<Option<PathBuf>, String> {
+    let config = deployment.join("etc/selinux/config");
+    if !config.is_file() {
+        return Ok(None);
+    }
+    let raw =
+        std::fs::read_to_string(&config).map_err(|err| format!("{}: {err}", config.display()))?;
+    let policy = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .find_map(|line| line.strip_prefix("SELINUXTYPE="))
+        .map(|value| value.trim_matches(|character| matches!(character, '\'' | '"')))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{}: no SELINUXTYPE", config.display()))?;
+    let contexts = deployment
+        .join("etc/selinux")
+        .join(policy)
+        .join("contexts/files/file_contexts");
+    if !contexts.is_file() {
+        return Err(format!(
+            "{}: missing target file contexts",
+            contexts.display()
+        ));
+    }
+    Ok(Some(contexts))
+}
+
+/// The LUKS UUID a container's header carries, which is how the installed
+/// machine names the container. The crypttab line writes it as `UUID=` and the
+/// TPM2 unit as `/dev/disk/by-uuid/`. Both forms survive the device
+/// renumbering between the live environment and the installed system.
+pub(crate) fn luks_uuid(partition: &str) -> Result<String, String> {
     let out = Command::new("cryptsetup")
         .args(["luksUUID", partition])
         .output()
@@ -308,6 +403,10 @@ fn luks_uuid(partition: &str) -> Result<String, String> {
     }
 }
 
+/// One key added to a container, authenticated with the key that already
+/// opens it. The new key is passed in a file only `cryptsetup` reads, and the
+/// slot is explicit, so a caller can name the key it added. `data_volume`
+/// tests the new key before it treats the addition as done.
 pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), String> {
     let at = staged_key(key)?;
     let mut command = Command::new("cryptsetup");
@@ -319,6 +418,9 @@ pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), Stri
         .map_err(|why| format!("adding a key to {}: {why}", open.partition))
 }
 
+/// Names the first key slot a container can take. LUKS2 stops at slot 31, and
+/// an explicit slot is what lets a caller name the key it added even when the
+/// header cannot be read back.
 pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
     const SLOTS: u32 = 32;
     (0..SLOTS)
@@ -326,6 +428,10 @@ pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
         .ok_or_else(|| format!("all {SLOTS} key slots are in use"))
 }
 
+/// Builds `cryptsetup`'s arguments that authenticate one header operation.
+/// A passphrase and a data volume's key both arrive on stdin, so neither
+/// reaches the process list. A key file is named by its path, which
+/// `cryptsetup` reads itself.
 pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
     match key {
         Key::File(path) => vec!["--key-file".into(), path.as_os_str().to_os_string()],
@@ -333,6 +439,9 @@ pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
     }
 }
 
+/// Runs a `cryptsetup` command that authenticates with `key`. The calling
+/// command has already built the argument vector, and `what` completes the
+/// sentence a spawn failure prints.
 pub(crate) fn run_with_key(mut command: Command, key: &Key, what: &str) -> Result<(), String> {
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     if key.bytes().is_some() {
@@ -358,8 +467,23 @@ pub(crate) fn run_with_key(mut command: Command, key: &Key, what: &str) -> Resul
     }
 }
 
-pub(crate) fn staged_key(key: &[u8]) -> Result<Staged, String> {
+pub(crate) struct StagedKey(pub(crate) PathBuf);
+
+impl Drop for StagedKey {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.0) {
+            eprintln!("{PROGRAM}: removing {}: {err}", self.0.display());
+        }
+    }
+}
+
+/// Writes one key to a file only its reader can open. A secret that reaches
+/// the disk must live under a path the process owns and removes.
+pub(crate) fn staged_key(key: &[u8]) -> Result<StagedKey, String> {
     use std::os::unix::fs::OpenOptionsExt as _;
+    // `create_new` fails if the path already exists, and `mode` applies from
+    // the file's first instant, so no other user can read the key at any
+    // moment.
     let at = std::env::temp_dir().join(format!(
         "tect-luks-key.{}.{:x}",
         std::process::id(),
@@ -374,13 +498,21 @@ pub(crate) fn staged_key(key: &[u8]) -> Result<Staged, String> {
         .mode(0o600)
         .open(&at)
         .map_err(|err| format!("{}: {err}", at.display()))?;
-    let at = Staged(at);
+    // `create_new` above proves this process made the key file, so the guard
+    // can own it. The guard is taken before the first write, because a write
+    // that fails part-way leaves a prefix of the key on disk. The guard is a
+    // value rather than a later statement, because a panic unwinds past a
+    // statement.
+    let at = StagedKey(at);
     file.write_all(key)
         .map_err(|err| format!("{}: {err}", at.0.display()))?;
     drop(file);
     Ok(at)
 }
 
+/// A new key that opens a container with no user present. The key is 32
+/// random bytes written as hex, read from the kernel and taken from no
+/// dependency.
 pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
@@ -393,23 +525,70 @@ pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     Ok(said.into_bytes())
 }
 
-fn retag_root(disk: &str, open: &LuksOpen, mapper: &str) -> Result<(), String> {
-    let number = partition_number(&open.partition)?.to_string();
-    close_volume(mapper)?;
+/// Sets an opened root container's partition type to `ROOT_GUID`, so the
+/// sealed UKI's initrd finds it. dm-crypt holds the partition busy, so this
+/// closes the container around the table write and opens it again with the
+/// same key.
+pub(crate) fn retag_root(layout: &CustomLayout) -> Result<(), String> {
+    let opened = layout
+        .mappers()
+        .into_iter()
+        .find(|(_, open)| open.target == "/");
+    let partition = opened
+        .as_ref()
+        .map(|(_, open)| open.partition.as_str())
+        .or_else(|| {
+            layout
+                .mounts
+                .iter()
+                .find(|mount| mount.target == "/")
+                .map(|mount| mount.partition.as_str())
+        })
+        .or_else(|| {
+            layout
+                .creates
+                .iter()
+                .find(|create| create.target == "/")
+                .map(|create| create.device.as_str())
+        })
+        .ok_or("the layout names no root partition")?;
+    let number = partition_number(partition)?.to_string();
+    if let Some((mapper, _)) = &opened {
+        close_volume(mapper)?;
+    }
     let out = Command::new("sfdisk")
-        .args(["--part-type", disk, &number, ROOT_GUID])
+        .args(["--part-type", &layout.disk, &number, ROOT_GUID])
         .output()
         .map_err(|err| format!("sfdisk: {err}, and it is what retags a root"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "retagging {} as the root partition: {}",
-            open.partition,
+    let tagged = match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "retagging {partition} as the root partition: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )),
+    };
+    let reopened = match opened {
+        Some((mapper, open)) => open_volume(open, &mapper),
+        None => Ok(()),
+    };
+    match (tagged, reopened) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(tagged), Ok(())) => Err(tagged),
+        (Ok(()), Err(opened)) => Err(opened),
+        (Err(tagged), Err(opened)) => Err(format!("{tagged}; and {opened}")),
     }
-    open_volume(open, mapper)
 }
 
+/// The GPT number of a partition device, taken as the trailing digits.
+/// `/dev/vda2`, `/dev/nvme0n1p2` and `/dev/mmcblk0p2` all give 2.
+///
+/// This answers a number rather than the digits it read, because every caller
+/// but two needs a number and the two that format it back are naming an
+/// `sfdisk` argument. While the digits and the number were separate steps the
+/// callers disagreed about which devices were numberable: the readers in
+/// `table.rs` dropped an entry whose digits overflow `usize` and `apply_cuts`
+/// accepted it, so a delete the editor screen had ignored was cut anyway and
+/// `sfdisk` refused it part way through the plan.
 pub(crate) fn partition_number(device: &str) -> Result<usize, String> {
     let digits: String = device
         .chars()

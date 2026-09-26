@@ -296,33 +296,6 @@ pub(crate) fn slots_from(raw: &str) -> Result<Slots, String> {
     Ok(Slots { keys, tokens })
 }
 
-pub(crate) fn data_rows(composefs: bool) -> Vec<Choice> {
-    let separate = Choice::new(copy::DATA_SEPARATE, "");
-    vec![
-        Choice::new(copy::DATA_TOGETHER, ""),
-        match composefs {
-            true => separate.hidden(),
-            false => separate,
-        },
-    ]
-}
-
-pub(crate) fn chose(shown: &str, size: &str) -> Data {
-    match shown == copy::DATA_SEPARATE {
-        true => Data {
-            size: size.to_string(),
-        },
-        false => Data::default(),
-    }
-}
-
-pub(crate) fn data_said(data: &Data) -> String {
-    match data.size.is_empty() {
-        true => copy::DATA_TOGETHER.to_string(),
-        false => copy::DATA_SEPARATE.to_string(),
-    }
-}
-
 pub(crate) fn ask_encryption(
     given: Option<String>,
     passphrase: Option<String>,

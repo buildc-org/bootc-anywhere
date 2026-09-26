@@ -71,6 +71,8 @@ pub(crate) struct Created {
     pub(crate) fstype: String,
     pub(crate) label: String,
     pub(crate) device: String,
+    pub(crate) encrypt: bool,
+    pub(crate) discoverable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -128,6 +130,10 @@ impl CustomLayout {
             .enumerate()
             .map(|(at, open)| (format!("tect-{}", at + 1), open))
             .collect()
+    }
+
+    pub(crate) fn changes_table(&self) -> bool {
+        !(self.deletes.is_empty() && self.creates.is_empty() && self.renames.is_empty())
     }
 
     pub(crate) fn opens_the_root(&self) -> bool {
@@ -213,11 +219,6 @@ pub(crate) fn at_boot(open: &LuksOpen, opened: Opened) -> &'static str {
     }
 }
 
-#[derive(Default)]
-pub struct Data {
-    pub size: String,
-}
-
 impl Encryption {
     pub(crate) fn wants_passphrase(kind: &str) -> bool {
         kind.ends_with("passphrase")
@@ -234,7 +235,6 @@ pub struct Answers {
     pub user: String,
     pub password: String,
     pub encryption: Encryption,
-    pub data: Data,
     pub(crate) layout: Option<CustomLayout>,
     pub(crate) opened: Opened,
 }

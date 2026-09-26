@@ -143,8 +143,6 @@ pub(crate) fn finalize(ready: &Ready) -> Result<(), String> {
 }
 
 fn require_credential_tool(image: &str) -> Result<(), String> {
-    // PCR 11 measures the UKI.
-    // Binding to PCR 7 would break when the firmware keys are enrolled.
     let out = Command::new("podman")
         .args([
             "run",
@@ -242,6 +240,8 @@ fn seal(image: &str, esp: &Path, key: &[u8]) -> Result<(), String> {
     let staged = staged_key(key)?;
     let key_mount = format!("{}:/run/one-time-key:ro", staged.0.display());
     let esp_mount = format!("{}:/esp", esp.display());
+    // PCR 11 measures the UKI.
+    // Binding to PCR 7 would break when the firmware keys are enrolled.
     let out = Command::new("podman")
         .args([
             "run",

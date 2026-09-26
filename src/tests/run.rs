@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn the_bootc_call_mounts_the_store_and_passes_every_recipe_flag() {
+    let root = scratch("bootc-argv");
+    let path = root.join(RECIPE);
+    let raw = EMITTED.replace("\"bootloader\": \"grub2\"", "\"bootloader\": \"systemd\"");
+    std::fs::write(&path, raw).expect("a recipe");
+    let recipe = InstallRecipe::read(&path).expect("the emitted recipe is supported");
+    let command = bootc_command(&recipe, Some("rd.luks.name=abcd=tect-1"));
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(command.get_program(), "podman");
+    assert_eq!(
+        args,
+        [
+            "run",
+            "--rm",
+            "--pull=never",
+            "--privileged",
+            "--pid=host",
+            "--security-opt",
+            "label=disable",
+            "-v",
+            "/dev:/dev",
+            "-v",
+            "/var/lib/containers:/var/lib/containers",
+            "-v",
+            "/var/lib/buildc/store:/var/lib/buildc/store:ro",
+            "-v",
+            "/etc/containers/storage.conf:/etc/containers/storage.conf:ro",
+            "-v",
+            "/run/tect-sysroot:/target",
+            "ghcr.io/buildc-org/deb2:latest",
+            "bootc",
+            "install",
+            "to-filesystem",
+            "--skip-finalize",
+            "--target-imgref",
+            "ghcr.io/buildc-org/deb2:latest",
+            "--composefs-backend",
+            "--bootloader",
+            "systemd",
+            "--generic-image",
+            "--karg",
+            "rd.luks.name=abcd=tect-1",
+            "/target",
+        ]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn the_last_screen_heads_the_key_and_the_steps() {
     let volumes = ["encrypted disk: /dev/vda".to_string()];
     let rows = done_rows(

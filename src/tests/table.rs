@@ -353,9 +353,13 @@ fn a_created_device_with_no_node_beside_it_takes_the_part_branch() {
 
 #[test]
 fn a_created_esp_is_cut_as_an_efi_partition() {
-    assert_eq!(super::created_type("/boot/efi"), "U");
-    assert_eq!(super::created_type("/"), "L");
-    assert_eq!(super::created_type(""), "L");
+    let at = |target: &str| Created {
+        target: target.to_string(),
+        ..Default::default()
+    };
+    assert_eq!(super::created_type(&at("/boot/efi")), "U");
+    assert_eq!(super::created_type(&at("/")), "L");
+    assert_eq!(super::created_type(&at("")), "L");
 }
 
 #[test]

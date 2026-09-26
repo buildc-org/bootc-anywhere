@@ -1,103 +1,121 @@
 use super::*;
 use std::io::Write as _;
 
-pub(crate) fn set(value: &mut Json, key: &str, field: Json) {
-    let Json::Object(fields) = value else { return };
-    match fields.iter_mut().find(|(name, _)| name == key) {
-        Some((_, held)) => *held = field,
-        None => fields.push((key.to_string(), field)),
-    }
+#[derive(Debug)]
+pub(crate) struct InstallRecipe {
+    pub(crate) image: String,
+    pub(crate) target_imgref: String,
+    pub(crate) composefs: bool,
+    pub(crate) generic: bool,
+    pub(crate) bootloader: String,
+    pub(crate) filesystem: String,
+    pub(crate) hostname: String,
+    pub(crate) groups: Vec<String>,
+    pub(crate) stores: Vec<String>,
+    pub(crate) boot: String,
+    pub(crate) luks_initramfs: bool,
 }
 
-pub(crate) fn unset(value: &mut Json, key: &str) {
-    let Json::Object(fields) = value else { return };
-    fields.retain(|(name, _)| name != key);
-}
-
-pub fn complete(recipe: &Path, answers: &Answers) -> Result<Json, String> {
-    let raw =
-        std::fs::read_to_string(recipe).map_err(|err| format!("{}: {err}", recipe.display()))?;
-    let mut doc = Json::parse(&raw).map_err(|err| format!("{}: {err}", recipe.display()))?;
-    set(&mut doc, "disk", Json::string(&answers.disk));
-    set(&mut doc, "hostname", Json::string(&answers.hostname));
-    set(
-        &mut doc,
-        "encryption",
-        Json::object([
-            ("type", Json::string(&answers.encryption.kind)),
-            ("passphrase", Json::string(&answers.encryption.passphrase)),
-            ("pin", Json::string(&answers.encryption.pin)),
-        ]),
-    );
-    let mut user = match doc {
-        Json::Object(ref mut fields) => match fields.iter().position(|(name, _)| name == "user") {
-            Some(at) => fields.remove(at).1,
-            None => Json::object([]),
-        },
-        _ => return Err(format!("{}: not an object", recipe.display())),
-    };
-    set(&mut user, "username", Json::string(&answers.user));
-    set(
-        &mut user,
-        "password",
-        Json::string(hashed(&answers.password)?),
-    );
-    set(&mut doc, "user", user);
-    if let Some(layout) = &answers.layout {
-        unset(&mut doc, "varDisk");
-        let mut mounts: Vec<Json> = layout
-            .mounts
-            .iter()
-            .map(|mount| {
-                Json::object([
-                    ("partition", Json::string(&mount.partition)),
-                    (
-                        "target",
-                        Json::string(match mount.target.as_str() {
-                            "/swap" => "swap",
-                            target => target,
-                        }),
-                    ),
-                    ("fstype", Json::string(&mount.fstype)),
-                ])
-            })
-            .collect();
-        for create in &layout.creates {
-            mounts.push(Json::object([
-                ("partition", Json::string(&create.device)),
-                (
-                    "target",
-                    Json::string(match create.target.as_str() {
-                        "/swap" => "swap",
-                        target => target,
-                    }),
-                ),
-                ("fstype", Json::string(&create.fstype)),
-            ]));
-        }
-        for (name, open) in layout.mappers() {
-            mounts.push(Json::object([
-                ("partition", Json::string(&mapper_path(&name))),
-                ("target", Json::string(&open.target)),
-                ("fstype", Json::string("unformatted")),
-            ]));
-        }
-        set(&mut doc, "customMounts", Json::array(mounts));
-        return Ok(doc);
-    }
-    let encrypted = answers.encryption.kind != NONE;
-    if !answers.data.size.is_empty() {
-        let size = match size_gb(&answers.data.size) {
-            Some(size) => format!("{size}GB"),
-            None => answers.data.size.clone(),
+impl InstallRecipe {
+    pub(crate) fn read(path: &Path) -> Result<Self, String> {
+        let raw =
+            std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let doc = Json::parse(&raw).map_err(|err| format!("{}: {err}", path.display()))?;
+        let Json::Object(fields) = &doc else {
+            return Err(format!("{}: not an object", path.display()));
         };
-        let mut var = Json::object([("size", Json::string(&size))]);
-        if encrypted {
-            set(&mut var, "encrypt", Json::Bool(true));
+        const KNOWN: &[&str] = &[
+            "image",
+            "targetImgref",
+            "composeFsBackend",
+            "genericImage",
+            "bootloader",
+            "filesystem",
+            "hostname",
+            "user",
+            "additionalImageStores",
+            "boot",
+            "luksInitramfs",
+        ];
+        // A field this installer does not understand could change what the recipe describes, so the whole document is refused.
+        for (at, (name, _)) in fields.iter().enumerate() {
+            if !KNOWN.contains(&name.as_str()) {
+                return Err(format!(
+                    "{}: field `{name}` is not implemented",
+                    path.display()
+                ));
+            }
+            if fields[..at].iter().any(|(held, _)| held == name) {
+                return Err(format!("{}: field `{name}` occurs twice", path.display()));
+            }
         }
-        set(&mut doc, "varDisk", var);
+
+        let image = required_text(&doc, path, "image")?;
+        let target_imgref = match optional_text(&doc, path, "targetImgref")? {
+            Some(value) if value.is_empty() => {
+                return Err(format!("{}: no `targetImgref`", path.display()))
+            }
+            Some(value) => value,
+            None => image.clone(),
+        };
+        let bootloader = required_text(&doc, path, "bootloader")?;
+        if !matches!(bootloader.as_str(), "grub2" | "systemd") {
+            return Err(format!(
+                "{}: {}",
+                path.display(),
+                copy::unknown_bootloader(&bootloader)
+            ));
+        }
+        let groups = match json::field(&doc, "user") {
+            None => Vec::new(),
+            Some(Json::Object(user)) => {
+                for (at, (name, _)) in user.iter().enumerate() {
+                    if name != "groups" {
+                        return Err(format!(
+                            "{}: field `user.{name}` is not implemented",
+                            path.display()
+                        ));
+                    }
+                    if user[..at].iter().any(|(held, _)| held == name) {
+                        return Err(format!(
+                            "{}: field `user.{name}` occurs twice",
+                            path.display()
+                        ));
+                    }
+                }
+                strings(&doc, path, "user", "groups")?
+            }
+            Some(_) => return Err(format!("{}: field `user` is not an object", path.display())),
+        };
+        let stores = strings(&doc, path, "", "additionalImageStores")?;
+        if stores.is_empty() {
+            return Err(format!(
+                "{}: no `additionalImageStores`, and every install reads the media store",
+                path.display()
+            ));
+        }
+        let composefs = optional_bool(&doc, path, "composeFsBackend")?.unwrap_or(false);
+        let filesystem = required_text(&doc, path, "filesystem")?;
+        if composefs && !["ext4", "btrfs"].contains(&filesystem.as_str()) {
+            return Err(format!(
+                "{}: `composeFsBackend` needs fs-verity, which `filesystem` {filesystem:?} has not got",
+                path.display()
+            ));
+        }
+        Ok(Self {
+            image,
+            target_imgref,
+            composefs,
+            generic: optional_bool(&doc, path, "genericImage")?.unwrap_or(false),
+            bootloader,
+            filesystem,
+            hostname: required_text(&doc, path, "hostname")?,
+            groups,
+            stores,
+            boot: optional_text(&doc, path, "boot")?.unwrap_or_default(),
+            luks_initramfs: optional_bool(&doc, path, "luksInitramfs")?.unwrap_or(false),
+        })
     }
-    Ok(doc)
 }
 
 pub(crate) fn hashed(password: &str) -> Result<String, String> {
@@ -105,6 +123,7 @@ pub(crate) fn hashed(password: &str) -> Result<String, String> {
         .args(["passwd", "-6", "-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("openssl: {err}, and it is what hashes the password"))?;
     child
@@ -120,33 +139,56 @@ pub(crate) fn hashed(password: &str) -> Result<String, String> {
     match out.status.success() && hash.starts_with('$') {
         true => Ok(hash),
         false => Err(format!(
-            "openssl passwd wrote no crypt string, and a plaintext password loses the install at \
-             its last step: {}",
+            "openssl passwd wrote no crypt string: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }
 }
 
-pub(crate) struct Staged(pub(crate) PathBuf);
+fn required_text(doc: &Json, path: &Path, key: &str) -> Result<String, String> {
+    optional_text(doc, path, key)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{}: no `{key}`", path.display()))
+}
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+fn optional_text(doc: &Json, path: &Path, key: &str) -> Result<Option<String>, String> {
+    match json::field(doc, key) {
+        None => Ok(None),
+        Some(Json::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("{}: field `{key}` is not a string", path.display())),
     }
 }
 
-pub(crate) fn stage(recipe: &Json) -> Result<Staged, String> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let path = std::env::temp_dir().join(format!("bootc-anywhere.{}.json", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|err| format!("{}: {err}", path.display()))?;
-    let staged = Staged(path);
-    file.write_all(recipe.render().as_bytes())
-        .map_err(|err| format!("{}: {err}", staged.0.display()))?;
-    Ok(staged)
+fn optional_bool(doc: &Json, path: &Path, key: &str) -> Result<Option<bool>, String> {
+    match json::field(doc, key) {
+        None => Ok(None),
+        Some(Json::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(format!(
+            "{}: field `{key}` is not true or false",
+            path.display()
+        )),
+    }
+}
+
+fn strings(doc: &Json, path: &Path, parent: &str, key: &str) -> Result<Vec<String>, String> {
+    let value = match parent {
+        "" => json::field(doc, key),
+        _ => json::field(doc, parent).and_then(|value| json::field(value, key)),
+    };
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Json::Array(items) = value else {
+        return Err(format!("{}: field `{key}` is not a list", path.display()));
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Json::String(value) => Ok(value.clone()),
+            _ => Err(format!(
+                "{}: field `{key}` contains a value that is not a string",
+                path.display()
+            )),
+        })
+        .collect()
 }

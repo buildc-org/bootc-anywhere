@@ -225,7 +225,8 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
   "filesystem": "ext4",
   "luksInitramfs": true,
   "hostname": "deb2",
-  "user": { "groups": ["sudo"] }
+  "user": { "groups": ["sudo"] },
+  "additionalImageStores": ["/var/lib/buildc/store"]
 }
 "#,
     )
@@ -302,7 +303,8 @@ fn install_screens() {
   "filesystem": "ext4",
   "luksInitramfs": true,
   "hostname": "deb2",
-  "user": { "groups": ["sudo"] }
+  "user": { "groups": ["sudo"] },
+  "additionalImageStores": ["/var/lib/buildc/store"]
 }
 "#,
     )
@@ -450,10 +452,10 @@ esac
         ),
         &format!("{}: ghcr.io/buildc-org/deb2:latest, from .\r\n", installer::PROGRAM),
         &[
-            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
+            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
             b"\x1b[B",
             b"\r",
-            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
+            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
             b"\x1b[A",
             b"deb2\r",
             b"tect\r",
@@ -462,7 +464,6 @@ esac
             b"\r", 
             b"\r", 
             b"\x1b[B",
-            b"\x1b[B",
             b"\x1b[B", 
             b"\r", 
             b"\x1b[B", 
@@ -470,7 +471,6 @@ esac
             b"", 
             b"\r", 
             b"", 
-            b"\x1b[A", 
             b"\x1b[A", 
             b"\x1b[A", 
             b"\r", 
@@ -576,10 +576,6 @@ esac
             "{phrase} is not drawn: {transcript}"
         );
     }
-    assert!(
-        !transcript.contains(installer::copy::DATA_SEPARATE),
-        "the hidden separate-home answer is drawn: {transcript}"
-    );
     for phrase in ["fedora", "Test OS"] {
         assert!(
             transcript.contains(phrase),

@@ -431,15 +431,16 @@ pub(crate) fn drawn_slots(parts: &[Partition], deletes: &[String]) -> Vec<usize>
         .collect()
 }
 
-pub(crate) fn created_type(target: &str) -> &'static str {
-    match target {
-        "/boot/efi" => "U",
-        _ => "L",
+pub(crate) fn created_type(create: &Created) -> &'static str {
+    match (create.discoverable, create.target.as_str()) {
+        (true, _) => ROOT_GUID,
+        (false, "/boot/efi") => "U",
+        (false, _) => "L",
     }
 }
 
 pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
+    if !layout.changes_table() {
         return Ok(());
     }
     let _lock = DiskLock::take(&layout.disk)?;
@@ -462,7 +463,7 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
 }
 
 pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
+    if !layout.changes_table() {
         return Ok(Vec::new());
     }
     let table = disk_table(&layout.disk)?;
@@ -519,7 +520,7 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
                 format!(
                     "start={start}, size={}GB, type={}{name}\n",
                     create.gb,
-                    created_type(&create.target)
+                    created_type(create)
                 )
             })
             .collect();
