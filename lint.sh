@@ -11,7 +11,7 @@ fi
 mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -print)
 
 deps=$(cargo tree -e normal,dev,build --depth 1 --prefix none | awk 'NR > 1 {print $1}' | sort -u | tr '\n' ' ')
-if [ "$deps" != "common libc " ]; then
+if [ "$deps" != "clap clap-markdown common libc " ]; then
     echo "lint: the dependency floor moved, it is now: $deps" >&2
     exit 1
 fi

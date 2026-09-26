@@ -10,6 +10,7 @@ name = "bootc-anywhere"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
 common = { git = "https://github.com/buildc-org/common", rev = "c7e9c09e315173d59ea54d659148136a559dc937" }
 
@@ -25,3 +26,6 @@ inherits = "release"
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+[dev-dependencies]
+clap-markdown = "0.1.5"

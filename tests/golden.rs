@@ -137,6 +137,79 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
 }
 
 #[test]
+fn version_names_the_program_and_the_release() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bootc-anywhere"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{} v{}\n", installer::PROGRAM, env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn a_bad_invocation_is_refused_with_the_usage_code() {
+    for (args, said) in [
+        (["--bogus"].as_slice(), "unexpected argument"),
+        (["--disk"].as_slice(), "a value is required"),
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_bootc-anywhere"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with("Error: "), "{args:?}: {stderr}");
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn help_prints_every_flag_and_exits_zero() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bootc-anywhere"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--from",
+        "--disk",
+        "--hostname",
+        "--user",
+        "--password",
+        "--encryption",
+        "--passphrase",
+        "--pin",
+        "--no-tui",
+    ] {
+        assert!(stdout.contains(flag), "{flag} is not in the help: {stdout}");
+    }
+}
+
+#[test]
+fn commands_doc() {
+    use clap::CommandFactory;
+    let path = crate_dir().join("docs/commands.md");
+    let options = clap_markdown::MarkdownOptions::new()
+        .title("Commands".to_string())
+        .show_footer(false);
+    let rendered =
+        clap_markdown::help_markdown_command_custom(&installer::cli::Args::command(), &options);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, rendered).unwrap();
+        return;
+    }
+    let doc = std::fs::read_to_string(&path).expect("docs/commands.md exists");
+    assert!(
+        doc == rendered,
+        "docs/commands.md is stale. Rerun with UPDATE_GOLDEN=1 and read the diff"
+    );
+}
+
+#[test]
 fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
     use std::time::Duration;
 
@@ -483,7 +556,7 @@ esac
         transcript.contains(installer::copy::GO_BACK),
         "{transcript}"
     );
-    assert!(transcript.contains("erased"), "{transcript}");
+    assert!(transcript.contains("undone"), "{transcript}");
     assert!(transcript.contains("/dev/sdb"), "{transcript}");
     assert!(transcript.contains("/dev/vda"), "{transcript}");
     assert!(transcript.contains("/dev/vda1"), "{transcript}");
