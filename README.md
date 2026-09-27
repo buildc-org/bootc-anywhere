@@ -45,8 +45,8 @@ the unlock configuration into the installed deployment.
 `clap`, `common` and `libc` are the runtime dependency floor, and
 `clap-markdown` renders the command reference in a test alone. `lint.sh` fails
 if either moves. It also fails if a file under `src/` or `tests/` names the
-`tect` crate
-or spawns the `tect` binary. A file under `src/` fails if it reaches ratatui at
+`buildc` crate
+or spawns the `buildc` binary. A file under `src/` fails if it reaches ratatui at
 all, because `common` is the only way to draw; the goldens under `tests/` may
 name ratatui in a comment. Those checks are the split, so they run before cargo
 is asked.
@@ -55,6 +55,20 @@ is asked.
 
 pinned by commit, never by version. A change there is a commit and a pin bump
 here.
+
+## Releases
+
+`bootc-anywhere` is before 1.0. A minor version may break what the one before it
+accepted, and only the latest release is supported. `CHANGELOG.md` lists what
+each release changed.
+
+Each architecture's tarball ships with its `.sha256` and a CycloneDX SBOM,
+`.cdx.json`. The binary carries its own dependency list, embedded by `cargo
+auditable`, which `cargo audit bin` and other scanners read. GitHub holds a
+build provenance attestation and an SBOM attestation for each tarball, and the
+provenance bundle also ships as `bootc-anywhere-v<version>.sigstore.json`:
+
+    gh attestation verify bootc-anywhere-v<version>-x86_64-linux-gnu.tar.gz -R buildc-org/bootc-anywhere
 
 ## Licence
 

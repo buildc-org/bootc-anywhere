@@ -16,14 +16,29 @@ jobs:
           - runner: ubuntu-24.04
             arch: x86_64
             machine: x86-64
+            rustup-sha256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
           - runner: ubuntu-24.04-arm
             arch: aarch64
             machine: ARM aarch64
+            rustup-sha256: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
     runs-on: ${{ matrix.runner }}
     container: quay.io/centos-bootc/centos-bootc:stream10
     steps:
       - name: Install the build tools
-        run: dnf install -y --setopt=install_weak_deps=False cargo git jq file tar gzip binutils
+        run: dnf install -y --setopt=install_weak_deps=False gcc git jq file tar gzip binutils
+
+      - name: Install rustup
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUSTUP_SHA256: ${{ matrix.rustup-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/archive/1.29.1/${ARCH}-unknown-linux-gnu/rustup-init"
+          echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -38,8 +53,11 @@ jobs:
           [ "${GITHUB_REF_NAME}" = "v${version}" ] \
             || { echo "tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2; exit 1; }
 
+      - name: Install the SBOM tools
+        run: cargo install --locked cargo-auditable@0.7.6 cargo-cyclonedx@0.5.9
+
       - name: Build
-        run: cargo build --profile dist --locked
+        run: cargo auditable build --profile dist --locked
 
       - name: Package with checksums
         env:
@@ -63,8 +81,14 @@ jobs:
             exit 1
           fi
           asset="bootc-anywhere-v${version}-${ARCH}-linux-gnu.tar.gz"
-          tar -czf "$asset" -C target/dist bootc-anywhere
+          # The published digest must stay the same when the same commit is rebuilt.
+          epoch="$(git -c safe.directory="$PWD" log -1 --format=%ct)"
+          tar --mtime="@${epoch}" --owner=0 --group=0 --numeric-owner \
+            -cf - -C target/dist bootc-anywhere | gzip -9n > "$asset"
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --target "${ARCH}-unknown-linux-gnu" \
+            --override-filename "bootc-anywhere-v${version}-${ARCH}-linux-gnu.cdx"
 
       - name: Hand the tarball to the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -73,6 +97,7 @@ jobs:
           path: |
             bootc-anywhere-v*-linux-gnu.tar.gz
             bootc-anywhere-v*-linux-gnu.tar.gz.sha256
+            bootc-anywhere-v*-linux-gnu.cdx.json
           if-no-files-found: error
 
   release:
@@ -88,10 +113,39 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Read the dependency list back
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tar -xzOf "bootc-anywhere-v${version}-x86_64-linux-gnu.tar.gz" bootc-anywhere > shipped
+          objcopy --dump-section .dep-v0=dep-v0.z shipped
+          python3 -c 'import sys, zlib; sys.stdout.buffer.write(zlib.decompress(open("dep-v0.z", "rb").read()))' \
+            | jq -e --arg v "$version" \
+              '.packages | (map(select(.root and .name == "installer" and .version == $v)) | length == 1) and length > 1'
+          rm shipped dep-v0.z
+
       - name: Attest the tarballs
-        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-path: bootc-anywhere-v*-linux-gnu.tar.gz
+
+      - name: Keep the provenance bundle
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE" "bootc-anywhere-${GITHUB_REF_NAME}.sigstore.json"
+
+      - name: Attest the x86_64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: bootc-anywhere-${{ github.ref_name }}-x86_64-linux-gnu.tar.gz
+          sbom-path: bootc-anywhere-${{ github.ref_name }}-x86_64-linux-gnu.cdx.json
+
+      - name: Attest the aarch64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: bootc-anywhere-${{ github.ref_name }}-aarch64-linux-gnu.tar.gz
+          sbom-path: bootc-anywhere-${{ github.ref_name }}-aarch64-linux-gnu.cdx.json
 
       - name: Create release
         env:
@@ -101,4 +155,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            bootc-anywhere-v*-linux-gnu.tar.gz bootc-anywhere-v*-linux-gnu.tar.gz.sha256
+            bootc-anywhere-v*-linux-gnu.tar.gz bootc-anywhere-v*-linux-gnu.tar.gz.sha256 \
+            bootc-anywhere-v*-linux-gnu.cdx.json "bootc-anywhere-${GITHUB_REF_NAME}.sigstore.json"
