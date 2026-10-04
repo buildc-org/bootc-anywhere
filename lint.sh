@@ -10,12 +10,6 @@ fi
 
 mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -print)
 
-deps=$(cargo tree -e normal,dev,build --depth 1 --prefix none | awk 'NR > 1 {print $1}' | sort -u | tr '\n' ' ')
-if [ "$deps" != "clap clap-markdown common libc " ]; then
-    echo "lint: the dependency floor moved, it is now: $deps" >&2
-    exit 1
-fi
-
 if grep -nE '\buse +(::)?tect\b|\bextern +crate +tect\b|(^|[^A-Za-z0-9_:])tect::' "${crate_src[@]}"; then
     echo "lint: the installer naming the tect crate, which it does not depend on" >&2
     exit 1
@@ -38,6 +32,9 @@ cargo fmt --check || {
     exit 1
 }
 echo "lint: the source is clean"
+
+cargo deny --locked check bans licenses sources
+echo "lint: the dependency policy accepts the locked graph"
 
 cargo test --quiet
 echo "lint: the installer does what it did"
