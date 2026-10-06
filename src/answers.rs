@@ -257,7 +257,7 @@ pub(crate) enum Leave {
 }
 
 pub(crate) fn leaving(err: &str) -> bool {
-    err == common::ui::INTERRUPTED
+    err == common::ui::INTERRUPTED || common::prompt::cancelled(err)
 }
 
 pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, String> {

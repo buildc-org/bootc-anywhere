@@ -215,7 +215,7 @@ impl Answers {
                                     }
                                 }
                                 Some(PartAction::Clear) => {
-                                    if common::ui::confirm(
+                                    if common::ui::confirm_or_no(
                                         &copy::clear_all(chosen.len()),
                                         copy::USE_DISK_ACTION,
                                         copy::GO_BACK,
