@@ -3,9 +3,8 @@ use super::*;
 #[test]
 #[ignore]
 fn holds_a_lock_for_another_process_to_find() {
-    let Ok(path) = std::env::var("BUILDC_TEST_LOCK") else {
-        return;
-    };
+    let path = std::env::var("BUILDC_TEST_LOCK")
+        .expect("the lock-holder fixture is run only by its parent test");
     let _held = hold_at(Path::new(&path)).expect("the child takes the lock");
     std::fs::write(format!("{path}.taken"), "").expect("the child reports it");
     std::thread::sleep(std::time::Duration::from_secs(30));
@@ -13,7 +12,7 @@ fn holds_a_lock_for_another_process_to_find() {
 
 #[test]
 fn a_second_installer_is_refused_and_told_where_the_first_one_is() {
-    let path = std::env::temp_dir().join(format!("tect-lock-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("buildc-lock-{}", std::process::id()));
     let taken = PathBuf::from(format!("{}.taken", path.display()));
     let _ = std::fs::remove_file(&taken);
 
@@ -41,6 +40,7 @@ fn a_second_installer_is_refused_and_told_where_the_first_one_is() {
         "{refused}"
     );
     assert!(refused.contains("again once it finishes"), "{refused}");
+
     child.kill().expect("the holder is killed");
     child.wait().expect("the holder is reaped");
     assert!(

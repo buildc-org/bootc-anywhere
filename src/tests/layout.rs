@@ -1,14 +1,7 @@
 use super::*;
 
-fn cut_whole_disk(
-    name: &str,
-    payload: &Payload,
-    kind: &str,
-) -> Option<(CustomLayout, Vec<String>)> {
-    let sfdisk = Command::new("sfdisk").arg("--version").output().ok()?;
-    if !sfdisk.status.success() {
-        return None;
-    }
+fn cut_whole_disk(name: &str, payload: &Payload, kind: &str) -> (CustomLayout, Vec<String>) {
+    require_sfdisk();
     let root = scratch(name);
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -46,7 +39,7 @@ fn cut_whole_disk(
         .map(|line| line.to_uppercase())
         .collect();
     let _ = std::fs::remove_dir_all(&root);
-    Some((layout, lines))
+    (layout, lines)
 }
 
 fn a_payload_for(bootloader: &str, composefs: bool) -> Payload {
@@ -64,9 +57,7 @@ const LINUX_TYPE: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 fn a_grub_disk_is_cut_into_an_esp_a_boot_and_a_root() {
     for composefs in [false, true] {
         let payload = a_payload_for("grub2", composefs);
-        let Some((layout, lines)) = cut_whole_disk("whole-grub", &payload, NONE) else {
-            return;
-        };
+        let (layout, lines) = cut_whole_disk("whole-grub", &payload, NONE);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines[0].contains(ESP_TYPE) && lines[0].contains("EFI-SYSTEM"));
         assert!(lines[1].contains(LINUX_TYPE) && lines[1].contains("\"BOOT\""));
@@ -87,9 +78,7 @@ fn a_grub_disk_is_cut_into_an_esp_a_boot_and_a_root() {
 fn a_systemd_boot_disk_is_cut_into_an_esp_and_a_root() {
     for (composefs, root_type) in [(false, LINUX_TYPE), (true, ROOT_GUID)] {
         let payload = a_payload_for("systemd", composefs);
-        let Some((_, lines)) = cut_whole_disk("whole-sdboot", &payload, NONE) else {
-            return;
-        };
+        let (_, lines) = cut_whole_disk("whole-sdboot", &payload, NONE);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains(ESP_TYPE));
         assert!(
@@ -103,9 +92,7 @@ fn a_systemd_boot_disk_is_cut_into_an_esp_and_a_root() {
 #[test]
 fn the_whole_disk_root_takes_the_rest_of_the_disk() {
     let payload = a_payload_for("grub2", false);
-    let Some((layout, _)) = cut_whole_disk("whole-rest", &payload, NONE) else {
-        return;
-    };
+    let (layout, _) = cut_whole_disk("whole-rest", &payload, NONE);
     let root = layout.creates.last().expect("a root");
     assert_eq!(root.gb, 30);
 }
@@ -114,9 +101,7 @@ fn the_whole_disk_root_takes_the_rest_of_the_disk() {
 fn an_encrypted_answer_seals_the_root_alone() {
     for kind in ["luks-passphrase", "tpm2-luks", "tpm2-luks-pin"] {
         let payload = a_payload_for("grub2", false);
-        let Some((layout, _)) = cut_whole_disk("whole-sealed", &payload, kind) else {
-            return;
-        };
+        let (layout, _) = cut_whole_disk("whole-sealed", &payload, kind);
         let sealed: Vec<&str> = layout
             .creates
             .iter()
@@ -126,9 +111,7 @@ fn an_encrypted_answer_seals_the_root_alone() {
         assert_eq!(sealed, ["/"], "{kind}");
     }
     let payload = a_payload_for("grub2", false);
-    let Some((layout, _)) = cut_whole_disk("whole-plain", &payload, NONE) else {
-        return;
-    };
+    let (layout, _) = cut_whole_disk("whole-plain", &payload, NONE);
     assert!(layout.creates.iter().all(|create| !create.encrypt));
 }
 
@@ -222,7 +205,7 @@ fn a_sealed_root_is_formatted_through_its_mapper() {
                 format: Some("fat32".to_string()),
             },
             Volume {
-                device: "/dev/mapper/tect-1".to_string(),
+                device: "/dev/mapper/buildc-1".to_string(),
                 target: "/".to_string(),
                 format: Some("btrfs".to_string()),
             },
@@ -283,7 +266,7 @@ fn a_program_missing_from_path_is_not_found() {
 }
 
 #[test]
-fn only_the_target_disks_tect_mappers_are_stale() {
+fn only_the_target_disks_buildc_mappers_are_stale() {
     let root = scratch("stale-mappers");
     let blocks = root.join("block");
     let devices = root.join("devices");
@@ -296,13 +279,13 @@ fn only_the_target_disks_tect_mappers_are_stale() {
         std::fs::create_dir_all(&partition).expect("a partition directory");
         std::os::unix::fs::symlink(&partition, at.join("slaves").join(part)).expect("a slave link");
     };
-    mapper("dm-0", "tect-1", "vda", "vda3");
-    mapper("dm-1", "tect-1x", "vdb", "vdb2");
+    mapper("dm-0", "buildc-1", "vda", "vda3");
+    mapper("dm-1", "buildc-1x", "vdb", "vdb2");
     mapper("dm-2", "luks-old", "vda", "vda4");
     std::fs::create_dir_all(blocks.join("vda")).expect("a plain disk entry");
     assert_eq!(
         stale_mappers(&blocks, "/dev/vda").expect("a sysfs listing"),
-        ["tect-1"]
+        ["buildc-1"]
     );
     let _ = std::fs::remove_dir_all(root);
 }

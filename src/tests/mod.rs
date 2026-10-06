@@ -41,6 +41,14 @@ fn scratch(name: &str) -> PathBuf {
     root
 }
 
+fn require_sfdisk() {
+    let output = Command::new("sfdisk")
+        .arg("--version")
+        .output()
+        .expect("sfdisk is required by the disk tests");
+    assert!(output.status.success(), "sfdisk --version failed");
+}
+
 fn a_payload() -> Payload {
     let payload = Payload {
         recipe: "/mnt/tect/install-recipe.json".into(),
