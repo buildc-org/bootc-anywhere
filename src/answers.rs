@@ -260,15 +260,19 @@ pub(crate) fn leaving(err: &str) -> bool {
     err == common::ui::INTERRUPTED || common::prompt::cancelled(err)
 }
 
+pub(crate) fn leave_options() -> [Choice; 3] {
+    [
+        Choice::new(copy::LEAVE_BACK, ""),
+        Choice::new(copy::LEAVE_OVER, ""),
+        Choice::new(copy::LEAVE_SHELL, ""),
+    ]
+}
+
 pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, String> {
     if !prompt.draws() {
         return Ok(Leave::Shell);
     }
-    let options = [
-        Choice::new(copy::LEAVE_BACK, ""),
-        Choice::new(copy::LEAVE_OVER, ""),
-        Choice::new(copy::LEAVE_SHELL, ""),
-    ];
+    let options = leave_options();
     match prompt.choose(copy::LEAVING, &options) {
         Ok(Some(1)) => Ok(Leave::Over),
         Ok(Some(2)) => Ok(Leave::Shell),

@@ -1,5 +1,14 @@
 use super::*;
 
+pub(crate) fn install_actions() -> [&'static str; 4] {
+    [
+        copy::INSTALL,
+        copy::EXIT_SHELL,
+        copy::RESTART,
+        copy::SHUT_DOWN,
+    ]
+}
+
 impl Answers {
     pub fn collect(
         payload: &Payload,
@@ -86,12 +95,7 @@ impl Answers {
                 reopen_on_table = false;
                 start = ROW_TABLE;
             }
-            let actions = [
-                copy::INSTALL,
-                copy::EXIT_SHELL,
-                copy::RESTART,
-                copy::SHUT_DOWN,
-            ];
+            let actions = install_actions();
             let filled = common::ui::form(
                 &mut fields,
                 &actions,

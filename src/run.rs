@@ -268,22 +268,27 @@ pub(crate) fn finish(
         &mut offered,
         |offered| {
             let rows = done_rows(recovery, log, steps, notes, volumes, offered);
-            let mut actions = Vec::new();
-            match offered {
-                Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
-                Offered::Unavailable(why) => {
-                    actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
-                }
-                Offered::None => actions.push(Choice::new(copy::RESTART, "")),
-            }
-            if !matches!(offered, Offered::None) {
-                actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
-            }
+            let actions = done_actions(offered);
             common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)
         },
         automatic::finalize,
         restart,
     )
+}
+
+pub(crate) fn done_actions(offered: &Offered) -> Vec<Choice> {
+    let mut actions = Vec::new();
+    match offered {
+        Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
+        Offered::Unavailable(why) => {
+            actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
+        }
+        Offered::None => actions.push(Choice::new(copy::RESTART, "")),
+    }
+    if !matches!(offered, Offered::None) {
+        actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
+    }
+    actions
 }
 
 pub(crate) fn choosing(
