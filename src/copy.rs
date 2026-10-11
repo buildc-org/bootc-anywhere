@@ -642,4 +642,63 @@ mod tests {
             "{unit}"
         );
     }
+
+    #[test]
+    fn a_typed_size_reads_back_in_gigabytes() {
+        assert_eq!(super::size_said("9999999K"), "10.2 GB");
+        assert_eq!(super::size_said("1M"), "0.0 GB");
+        assert_eq!(super::size_said("1G"), "1.1 GB");
+        assert_eq!(super::size_said("9999999T"), "10995115178.2 GB");
+        assert_eq!(super::size_said("5 GB"), "5.0 GB");
+        assert_eq!(super::size_said("bogus"), "bogus");
+    }
+
+    #[test]
+    fn a_custom_bootloader_is_named_and_systemd_states_its_rule() {
+        assert_eq!(
+            super::custom_keep_boot("systemd"),
+            "systemd-boot does not use a separate /boot"
+        );
+        assert!(super::custom_keep_boot("grub2").contains("grub2"));
+    }
+
+    #[test]
+    fn a_slot_kill_names_the_device_the_slot_and_the_command() {
+        let rows = super::kill_slot("/dev/vda", 3, 5);
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].contains("/dev/vda") && rows[0].contains('3') && rows[0].contains('5'),
+            "{}",
+            rows[0]
+        );
+        assert!(rows[1].contains("luksKillSlot /dev/vda 3"), "{}", rows[1]);
+        let any = super::kill_a_slot("/dev/vda", 5);
+        assert_eq!(any.len(), 2);
+        assert!(
+            any[0].contains("/dev/vda") && any[0].contains('5'),
+            "{}",
+            any[0]
+        );
+        assert!(
+            any[1].contains("luksKillSlot /dev/vda <slot>"),
+            "{}",
+            any[1]
+        );
+    }
+
+    #[test]
+    fn the_uki_db_panel_states_the_platform_key_steps() {
+        let rows = super::required_uki_db();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].contains("platform key"), "{}", rows[0]);
+        assert!(rows[1].is_empty(), "{}", rows[1]);
+        assert!(rows[2].contains("stops booting"), "{}", rows[2]);
+    }
+
+    #[test]
+    fn the_recovery_line_carries_the_key() {
+        let said = super::recovery("AAAA-BBBB-CCCC");
+        assert!(said.contains("AAAA-BBBB-CCCC"), "{said}");
+        assert!(said.contains(super::write_down()), "{said}");
+    }
 }
