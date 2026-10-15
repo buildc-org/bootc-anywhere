@@ -382,6 +382,10 @@ fn boot_labels(at: &Path) -> Vec<Carried> {
 fn os_release_name(at: &Path) -> Option<String> {
     let file = inside_file(at, Path::new("etc/os-release"))?;
     let text = std::fs::read_to_string(&file).ok()?;
+    pretty_name(&text)
+}
+
+fn pretty_name(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let value = line
             .strip_prefix("PRETTY_NAME=")?
@@ -399,16 +403,19 @@ fn loader_title(at: &Path) -> Option<String> {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        let title = text
-            .lines()
-            .find_map(|line| line.strip_prefix("title "))
-            .map(str::trim)
-            .filter(|title| !title.is_empty());
-        if let Some(title) = title {
-            return Some(title.to_string());
+        if let Some(title) = entry_title(&text) {
+            return Some(title);
         }
     }
     None
+}
+
+fn entry_title(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("title "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
 }
 
 /// The three GPT types a Windows install carries: the Microsoft reserved
@@ -749,16 +756,34 @@ pub(crate) fn power_off() -> Result<(), String> {
 
 pub(crate) fn under_media_installer() -> bool {
     std::fs::read_to_string("/proc/self/cgroup")
-        .map(|cgroup| {
-            cgroup.contains("bootc-anywhere.service")
-                || cgroup.contains("bootc-anywhere-vt.service")
-        })
+        .map(|cgroup| media_installer(&cgroup))
         .unwrap_or(false)
+}
+
+fn media_installer(cgroup: &str) -> bool {
+    cgroup.contains("bootc-anywhere.service") || cgroup.contains("bootc-anywhere-vt.service")
 }
 
 pub(crate) fn console_vt() -> Option<u32> {
     let active = std::fs::read_to_string(tty0_active()).ok()?;
+    active_vt(&active)
+}
+
+fn active_vt(active: &str) -> Option<u32> {
     active.trim().strip_prefix("tty")?.parse().ok()
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_readers(text: &str) {
+    let _ = partition_rows(text);
+    let _ = carries_content(text);
+    let _ = crypttabs(text);
+    let _ = fstab_target(text, "fuzz");
+    let _ = mountable_rows(text);
+    let _ = pretty_name(text);
+    let _ = entry_title(text);
+    let _ = media_installer(text);
+    let _ = active_vt(text);
 }
 
 pub(crate) fn switch_to_shell() -> Result<(), String> {

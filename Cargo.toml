@@ -6,6 +6,9 @@ rust-version = "1.88"
 publish = false
 description = "Installs a bootc image onto a disk from the media that carries it"
 
+[features]
+fuzzing = ["dep:tempfile"]
+
 [[bin]]
 name = "bootc-anywhere"
 path = "src/main.rs"
@@ -13,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
+tempfile = { version = "3.27.0", optional = true }
 common = { git = "https://github.com/buildc-org/common", rev = "108da36985d0462233ee058738cca0b0d1a1e7d5" }
 
 [profile.release]

@@ -8,7 +8,10 @@ if [ "${1:-}" = "--fix" ]; then
     exit
 fi
 
-mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -print)
+# Every .rs in the crate, so a `build.rs` added at the root later is covered
+# without editing this, the way `buildc`'s own lint covers a new workspace member.
+mapfile -t crate_src < <(find . \( -path ./target -o -path ./fuzz/target \) -prune -o \
+    -name '*.rs' -type f -print)
 
 if grep -nE '\buse +(::)?tect\b|\bextern +crate +tect\b|(^|[^A-Za-z0-9_:])tect::' "${crate_src[@]}"; then
     echo "lint: the installer naming the tect crate, which it does not depend on" >&2
@@ -35,6 +38,11 @@ echo "lint: the source is clean"
 
 cargo deny --locked check bans licenses sources
 echo "lint: the dependency policy accepts the locked graph"
+
+# Only the scheduled fuzz job builds the fuzz targets, so this check keeps
+# their entry points compiling on every push.
+cargo check --locked --features fuzzing
+echo "lint: the fuzz entry points compile"
 
 cargo nextest run --locked
 echo "lint: the installer does what it did"
