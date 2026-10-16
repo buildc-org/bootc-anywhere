@@ -438,6 +438,9 @@ pub fn writing(log: Option<&std::path::Path>) -> String {
         None => "disk being overwritten; this screen is the only log".to_string(),
     }
 }
+pub fn log_stopped(why: &str) -> String {
+    format!("the install log stops here: {why}")
+}
 
 pub fn recovery(key: &str) -> String {
     format!("{} {key}", write_down())

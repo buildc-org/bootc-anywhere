@@ -83,25 +83,39 @@ impl Context {
         if unsafe { fdisk_get_partitions(self.cxt, &mut table) } < 0 || table.is_null() {
             return Vec::new();
         }
+        // SAFETY: `table` is the live table `fdisk_get_partitions` returned.
+        let entries = unsafe { fdisk_table_get_nents(table) };
         let mut slots = Vec::new();
-        for index in 0..unsafe { fdisk_table_get_nents(table) } {
+        for index in 0..entries {
             // SAFETY: `index` is below the entry count just read from the live table.
             let part = unsafe { fdisk_table_get_partition(table, index) };
             if part.is_null() {
                 continue;
             }
-            if unsafe { fdisk_partition_has_start(part) } == 0
-                || unsafe { fdisk_partition_has_size(part) } == 0
-                || unsafe { fdisk_partition_has_partno(part) } == 0
-            {
+            // SAFETY: `part` is a non-null entry of the live table, so each guard reads a present field.
+            let missing = unsafe {
+                fdisk_partition_has_start(part) == 0
+                    || fdisk_partition_has_size(part) == 0
+                    || fdisk_partition_has_partno(part) == 0
+            };
+            if missing {
                 continue;
             }
-            let number = unsafe { fdisk_partition_get_partno(part) };
+            // SAFETY: the guards above prove the part number, start and size are present.
+            let (partno, start, sectors) = unsafe {
+                (
+                    fdisk_partition_get_partno(part),
+                    fdisk_partition_get_start(part),
+                    fdisk_partition_get_size(part),
+                )
+            };
+            // libfdisk numbers partitions from zero, and the device node counts from one.
+            let number = partno + 1;
             slots.push(Slot {
-                node: partname(disk, number + 1),
-                number: number + 1,
-                start: unsafe { fdisk_partition_get_start(part) },
-                sectors: unsafe { fdisk_partition_get_size(part) },
+                node: partname(disk, number),
+                number,
+                start,
+                sectors,
             });
         }
         // SAFETY: `table` is the table libfdisk returned and no reference to it is used after this.
@@ -142,15 +156,22 @@ pub(crate) fn partname(disk: &str, number: usize) -> String {
 pub(crate) fn read_table(disk: &str) -> Result<DiskTable, String> {
     const ALIGN: u64 = 1024 * 1024;
     let context = Context::read_only(disk)?;
-    let sector = unsafe { fdisk_get_sector_size(context.cxt) } as u64;
+    // SAFETY: `context` owns a live context for the whole function.
+    let (sector, first, last) = unsafe {
+        (
+            fdisk_get_sector_size(context.cxt),
+            fdisk_get_first_lba(context.cxt),
+            fdisk_get_last_lba(context.cxt),
+        )
+    };
     let mut table = DiskTable {
         sector: match sector {
             0 => 512,
             size => size,
         },
         label: context.label(),
-        first: unsafe { fdisk_get_first_lba(context.cxt) },
-        last: unsafe { fdisk_get_last_lba(context.cxt) },
+        first,
+        last,
         slots: context.slots(disk),
     };
     // A non-GPT label keeps the 1 MiB start and the 34-sector tail that a future GPT needs.

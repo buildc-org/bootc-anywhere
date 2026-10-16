@@ -13,39 +13,29 @@ pub(crate) const NONE: &str = "none";
 pub(crate) const TPM: &str = "/dev/tpmrm0";
 
 pub(crate) fn tpm() -> PathBuf {
-    std::env::var_os("BUILDC_TPM")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(TPM))
+    std::env::var_os("BUILDC_TPM").map_or_else(|| PathBuf::from(TPM), PathBuf::from)
 }
 
 const SYS_BLOCK: &str = "/sys/block";
 
 pub(crate) fn sys_block() -> PathBuf {
-    std::env::var_os("BUILDC_SYS_BLOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SYS_BLOCK))
+    std::env::var_os("BUILDC_SYS_BLOCK").map_or_else(|| PathBuf::from(SYS_BLOCK), PathBuf::from)
 }
 
 const DEV: &str = "/dev";
 
 pub(crate) fn dev() -> PathBuf {
-    std::env::var_os("BUILDC_DEV")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEV))
+    std::env::var_os("BUILDC_DEV").map_or_else(|| PathBuf::from(DEV), PathBuf::from)
 }
 
 const TTY0_ACTIVE: &str = "/sys/class/tty/tty0/active";
 
 pub(crate) fn tty0_active() -> PathBuf {
-    std::env::var_os("BUILDC_TTY0_ACTIVE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(TTY0_ACTIVE))
+    std::env::var_os("BUILDC_TTY0_ACTIVE").map_or_else(|| PathBuf::from(TTY0_ACTIVE), PathBuf::from)
 }
 
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 
 pub(crate) fn efivars() -> PathBuf {
-    std::env::var_os("BUILDC_EFIVARS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(EFIVARS))
+    std::env::var_os("BUILDC_EFIVARS").map_or_else(|| PathBuf::from(EFIVARS), PathBuf::from)
 }

@@ -102,6 +102,13 @@ impl InstallRecipe {
                 path.display()
             ));
         }
+        let boot = optional_text(&doc, path, "boot")?.unwrap_or_default();
+        if !boot.is_empty() && crate::copy::boot_chain(&boot).is_none() {
+            return Err(format!(
+                "{}: `boot` {boot:?} is not a boot chain this installer configures",
+                path.display()
+            ));
+        }
         Ok(Self {
             image,
             target_imgref,
@@ -112,7 +119,7 @@ impl InstallRecipe {
             hostname: required_text(&doc, path, "hostname")?,
             groups,
             stores,
-            boot: optional_text(&doc, path, "boot")?.unwrap_or_default(),
+            boot,
             luks_initramfs: optional_bool(&doc, path, "luksInitramfs")?.unwrap_or(false),
         })
     }
@@ -185,10 +192,12 @@ fn strings(doc: &Json, path: &Path, parent: &str, key: &str) -> Result<Vec<Strin
         .iter()
         .map(|item| match item {
             Json::String(value) => Ok(value.clone()),
-            _ => Err(format!(
-                "{}: field `{key}` contains a value that is not a string",
-                path.display()
-            )),
+            Json::Null | Json::Bool(_) | Json::Number(_) | Json::Array(_) | Json::Object(_) => {
+                Err(format!(
+                    "{}: field `{key}` contains a value that is not a string",
+                    path.display()
+                ))
+            }
         })
         .collect()
 }

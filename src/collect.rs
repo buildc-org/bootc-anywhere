@@ -10,6 +10,11 @@ pub(crate) fn install_actions() -> [&'static str; 4] {
 }
 
 impl Answers {
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "the form loop holds the disk, layout and focus state the user changes between redraws"
+    )]
     pub fn collect(
         payload: &Payload,
         given: Given,
@@ -20,7 +25,7 @@ impl Answers {
         if !prompt.draws() {
             return Ok(Some(seeded));
         }
-        let scan = Scan::read();
+        let scan = Scan::read()?;
         let mut disk = seeded.disk.clone();
         if disk.is_empty() {
             disk = scan.only_empty_disk().unwrap_or_default();
@@ -28,14 +33,14 @@ impl Answers {
         if let Some(why) = scan.refusal(&disk) {
             return Err(why);
         }
-        let chosen = seeded.encryption.kind.clone();
+        let chosen_kind = seeded.encryption.kind.clone();
         let mut kind = match (
             named,
-            chosen.as_str(),
+            chosen_kind.as_str(),
             tpm().exists() && payload.luks_initramfs,
         ) {
             (false, NONE, true) => "tpm2-luks".to_string(),
-            _ => chosen,
+            _ => chosen_kind,
         };
         let mut layout: Option<CustomLayout> = None;
         let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref());
@@ -52,7 +57,7 @@ impl Answers {
                 (true, _) => Some(CustomLayout::empty(&disk)),
                 (false, _) => None,
             };
-            let chosen = scan
+            let parts = scan
                 .get(&disk)
                 .map(|entry| entry.partitions.as_slice())
                 .unwrap_or(&[]);
@@ -60,13 +65,7 @@ impl Answers {
                 true => Some(scan.table(&disk)?),
                 false => None,
             };
-            let table = layout_table(
-                &scan,
-                &disk,
-                layout.as_ref(),
-                payload,
-                kind != NONE,
-            );
+            let table = layout_table(&scan, &disk, layout.as_ref(), payload, kind != NONE);
             let at = match cursor {
                 Some(at) => at,
                 None => table
@@ -88,7 +87,6 @@ impl Answers {
                     tpm().exists(),
                     payload.luks_initramfs,
                 ),
-                None if manual => common::ui::Field::action(copy::ROW_ENCRYPTION, shown(&kind)),
                 None => common::ui::Field::action(copy::ROW_ENCRYPTION, shown(&kind)),
             };
             if reopen_on_table {
@@ -110,7 +108,7 @@ impl Answers {
                     )
                 },
                 |fields| pair_mismatch(fields, [ROW_PASSWORD, ROW_CONFIRM]),
-                |fields| asked(fields),
+                asked,
                 copy::INSTALL_KEYS,
                 &panel,
                 &[
@@ -220,13 +218,13 @@ impl Answers {
                                 }
                                 Some(PartAction::Clear) => {
                                     if common::ui::confirm_or_no(
-                                        &copy::clear_all(chosen.len()),
+                                        &copy::clear_all(parts.len()),
                                         copy::USE_DISK_ACTION,
                                         copy::GO_BACK,
                                     )? {
                                         let held = held_layout(&mut layout, &disk);
                                         held.deletes =
-                                            chosen.iter().map(|part| part.device.clone()).collect();
+                                            parts.iter().map(|part| part.device.clone()).collect();
                                         held.mounts.clear();
                                         held.opens.clear();
                                         held.renames.clear();
@@ -326,11 +324,15 @@ impl Answers {
                                         }
                                     }
                                 }
-                                _ => {}
+                                PartAction::Reset
+                                | PartAction::Open
+                                | PartAction::Close
+                                | PartAction::Clear
+                                | PartAction::Create => {}
                             }
                         }
                         Some(RowKind::Part { index }) => {
-                            let Some(partition) = chosen.get(*index) else {
+                            let Some(partition) = parts.get(*index) else {
                                 continue;
                             };
                             let Some(action) = item

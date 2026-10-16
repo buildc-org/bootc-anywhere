@@ -329,6 +329,7 @@ fn a_partition_names_the_systems_it_carries() {
     // If labels_at opens the FIFO, then it waits forever for a writer.
     let fifo = hostile.join("etc/os-release");
     let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: the CString is NUL-terminated and outlives the call.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     assert!(labels_at(&hostile, "ext4").is_empty());
     let linked = root.join("linked");
@@ -523,4 +524,37 @@ fn the_walk_reads_every_mountable_node_and_no_container() {
     for fstype in ["vfat", "exfat", "iso9660", ""] {
         assert_eq!(mount_options(fstype), "ro", "{fstype}");
     }
+}
+
+#[test]
+fn a_blkid_failure_refuses_the_key_device() {
+    use std::os::unix::process::ExitStatusExt as _;
+    // ExitStatus::from_raw expects a wait status with the exit code in its high byte.
+    let said = |code: i32, stdout: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: b"probe failed".to_vec(),
+    };
+    let device = Path::new("/dev/sdb1");
+    assert_eq!(fstype_said(device, &said(0, "ext4\n")).unwrap(), "ext4");
+    assert!(fstype_said(device, &said(2, "")).is_err());
+    let refused = fstype_said(device, &said(4, "")).unwrap_err();
+    assert!(refused.contains("/dev/sdb1"), "{refused}");
+}
+
+#[test]
+fn an_unreadable_crypttab_leaves_the_old_system_unread() {
+    // The unreadable crypttab case needs an unprivileged user because root reads a file whose mode is 0200.
+    if running_as_root() {
+        return;
+    }
+    let at = scratch("old-system-crypttab");
+    std::fs::create_dir_all(at.join("etc")).unwrap();
+    std::fs::write(at.join("etc/fstab"), "UUID=aa / ext4 defaults 0 1\n").unwrap();
+    write_only(&at.join("etc/crypttab"), b"root UUID=bb none luks\n");
+    let fstab = at.join("etc/fstab");
+    let Err(unread) = old_system(at.clone(), &fstab) else {
+        panic!("an unreadable crypttab read as a system");
+    };
+    assert!(unread.contains("etc/crypttab"), "{unread}");
 }

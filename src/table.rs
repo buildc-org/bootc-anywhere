@@ -487,8 +487,8 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
         .iter()
         .map(|rename| partition_number(&rename.partition).map(|number| (rename, number)))
         .collect::<Result<Vec<_>, _>>()?;
-    let (starts, _) = place_creates(&table, &layout.deletes, &layout.creates)
-        .map_err(|room| copy::custom_too_big(room))?;
+    let (starts, _) =
+        place_creates(&table, &layout.deletes, &layout.creates).map_err(copy::custom_too_big)?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {

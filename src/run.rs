@@ -34,6 +34,7 @@ fn installed(
     let karg = root_luks_arg(&prepared.layout, &payload.boot)?;
     let mut command = bootc_command(&payload.install, karg.as_deref());
     let (mut log, at) = open_log(payload);
+    let mut stopped = None;
     if !prompt.draws() {
         eprintln!(
             "{PROGRAM}: installing {} as {} onto {}, {}",
@@ -81,15 +82,13 @@ fn installed(
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            if let Some(log) = &mut log {
-                let _ = writeln!(log, "{line}");
+            if let Some(err) = log.as_mut().and_then(|log| writeln!(log, "{line}").err()) {
+                log = None;
+                let note = copy::log_stopped(&err.to_string());
+                shown(&mut region, &note);
+                stopped = Some(note);
             }
-            match &mut region {
-                None => println!("{line}"),
-                Some(region) => {
-                    let _ = region.note(&line);
-                }
-            }
+            shown(&mut region, &line);
         }
     }
     let finished = child.wait().map_err(|err| format!("podman: {err}"));
@@ -98,6 +97,9 @@ fn installed(
             let _ = region.step(100, 0, "Operating system installed");
         }
         region.close();
+    }
+    if let Some(note) = &stopped {
+        eprintln!("{PROGRAM}: {note}");
     }
     let status = finished?;
     if !status.success() {
@@ -386,4 +388,13 @@ pub fn own_screen(payload: &Payload, prompt: &Prompt) {
     print!("\u{1b}[2J\u{1b}[H");
     let _ = std::io::stdout().flush();
     common::ui::own_screen(copy::installing(&image_name(&payload.image)));
+}
+
+fn shown(region: &mut Option<common::ui::Progress>, line: &str) {
+    match region {
+        None => println!("{line}"),
+        Some(region) => {
+            let _ = region.note(line);
+        }
+    }
 }

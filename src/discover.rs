@@ -90,12 +90,12 @@ fn device_spec(said: &str) -> bool {
 
 fn on_device(said: &str, passdev: bool) -> Option<KeySource> {
     let (first, rest) = said.split_once(':')?;
-    let (device, path, timed) = match (device_spec(first), passdev) {
+    let (device, path, device_first) = match (device_spec(first), passdev) {
         (true, _) => (first, rest, true),
         (false, false) if device_spec(rest) => (rest, first, false),
         _ => return None,
     };
-    let path = match timed {
+    let path = match device_first {
         true => path.split_once(':').map_or(path, |(path, _timeout)| path),
         false => path,
     };
@@ -168,12 +168,10 @@ fn fstab_target(raw: &str, name: &str) -> String {
     String::new()
 }
 
-const MOUNTS: &str = "/run/tect-old";
+const MOUNTS: &str = "/run/buildc-old";
 
 fn mounts_root() -> PathBuf {
-    std::env::var_os("BUILDC_MOUNT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(MOUNTS))
+    std::env::var_os("BUILDC_MOUNT_ROOT").map_or_else(|| PathBuf::from(MOUNTS), PathBuf::from)
 }
 
 #[derive(Default)]
@@ -333,21 +331,27 @@ fn walk_disk(disk: &str, mounts: &mut Mounts) -> Walked {
         if !labels.is_empty() {
             walked.labels.push((device.clone(), labels));
         }
-        let fstab = at.join("etc/fstab");
-        if !fstab.is_file() {
+        let Some(fstab) = inside_file(&at, Path::new("etc/fstab")) else {
             continue;
+        };
+        match old_system(at, &fstab) {
+            Ok(system) => walked.systems.push(system),
+            Err(err) => walked.unread.push(err),
         }
-        let crypttab = at.join("etc/crypttab");
-        walked.systems.push(OldSystem {
-            crypttab: match crypttab.is_file() {
-                true => std::fs::read_to_string(&crypttab).unwrap_or_default(),
-                false => String::new(),
-            },
-            fstab: std::fs::read_to_string(&fstab).unwrap_or_default(),
-            at,
-        });
     }
     walked
+}
+
+pub(crate) fn old_system(at: PathBuf, fstab: &Path) -> Result<OldSystem, String> {
+    let crypttab = match inside_file(&at, Path::new("etc/crypttab")) {
+        Some(crypttab) => read_lossy(&crypttab)?,
+        None => String::new(),
+    };
+    Ok(OldSystem {
+        crypttab,
+        fstab: read_lossy(fstab)?,
+        at,
+    })
 }
 
 pub(crate) fn labels_at(at: &Path, fstype: &str) -> Vec<Carried> {
@@ -395,9 +399,6 @@ fn pretty_name(text: &str) -> Option<String> {
     })
 }
 
-/// Reads the title of the first loader entry a mounted filesystem carries.
-/// The entries sit under `loader/` where this is the boot partition and under
-/// `boot/loader/` where it is the root.
 fn loader_title(at: &Path) -> Option<String> {
     for file in loader_files(at) {
         let Ok(text) = std::fs::read_to_string(&file) else {
@@ -418,13 +419,10 @@ fn entry_title(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The three GPT types a Windows install carries: the Microsoft reserved
-/// partition, the basic data volume and the recovery partition.
 const MSR: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
 const BASIC_DATA: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
 const RECOVERY: &str = "de94bba4-06d1-4d40-a16a-bfd50179d6ac";
 
-/// A detected system's name is data read off the disk rather than screen
 const WINDOWS: &str = "Windows";
 
 pub(crate) fn windows_label(partitions: &[Partition]) -> Option<(String, String)> {
@@ -495,7 +493,7 @@ fn key_bytes(system: &OldSystem, entry: &Crypttab, mounts: &mut Mounts) -> Resul
             if removable(&resolved) {
                 return Err(copy::old_root_key_removable(&entry.name));
             }
-            let fstype = fstype_of(&resolved);
+            let fstype = fstype_of(&resolved)?;
             let at = mount_ro(&resolved, &fstype, mounts)?;
             key_file(&entry.name, &at, path)
         }
@@ -525,13 +523,29 @@ fn resolve_device(said: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{said} is not present"))
 }
 
-fn fstype_of(device: &Path) -> String {
-    Command::new("blkid")
+fn fstype_of(device: &Path) -> Result<String, String> {
+    let out = Command::new("blkid")
         .args(["-s", "TYPE", "-o", "value"])
         .arg(device)
         .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default()
+        .map_err(|err| {
+            format!(
+                "blkid: {err}, and it is what reads the filesystem on {}",
+                device.display()
+            )
+        })?;
+    fstype_said(device, &out)
+}
+
+pub(crate) fn fstype_said(device: &Path, out: &std::process::Output) -> Result<String, String> {
+    match out.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        _ => Err(format!(
+            "blkid could not read the filesystem on {}: {}",
+            device.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
 const SYS_CLASS_BLOCK: &str = "/sys/class/block";
@@ -569,19 +583,28 @@ pub(crate) fn test_key(container: &str, key: &[u8]) -> Result<bool, String> {
     let mut child = command
         .spawn()
         .map_err(|err| format!("cryptsetup: {err}, and it is what tests a key"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(key);
-    }
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(key));
     let status = child.wait().map_err(|err| format!("cryptsetup: {err}"))?;
-    Ok(status.success())
+    // cryptsetup closes the pipe when it rejects the key, so a broken pipe carries no verdict of its own.
+    match written {
+        Err(err) if err.kind() != std::io::ErrorKind::BrokenPipe => Err(format!(
+            "cryptsetup: {err}, while the key was written to it"
+        )),
+        Ok(()) | Err(_) => Ok(status.success()),
+    }
 }
+
+type Opens = dyn Fn(&Partition, &[u8]) -> Result<bool, String>;
 
 pub(crate) fn discover(
     partitions: &[Partition],
     systems: &[OldSystem],
     unread: &[String],
     mounts: &mut Mounts,
-    opens: &dyn Fn(&Partition, &[u8]) -> Result<bool, String>,
+    opens: &Opens,
 ) -> Discovered {
     let mut found = Discovered::default();
     for partition in partitions
@@ -645,8 +668,8 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn read() -> Self {
-        let in_use = in_use_now();
+    pub(crate) fn read() -> Result<Self, String> {
+        let in_use = in_use_now()?;
         let mut held = Mounts::default();
         let mut listed = Vec::new();
         let mut unread = Vec::new();
@@ -702,10 +725,10 @@ impl Scan {
                 keys,
             });
         }
-        Self {
+        Ok(Self {
             disks: found,
             unread,
-        }
+        })
     }
 
     pub(crate) fn get(&self, device: &str) -> Option<&DiskScan> {
@@ -755,9 +778,7 @@ pub(crate) fn power_off() -> Result<(), String> {
 }
 
 pub(crate) fn under_media_installer() -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .map(|cgroup| media_installer(&cgroup))
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroup| media_installer(&cgroup))
 }
 
 fn media_installer(cgroup: &str) -> bool {

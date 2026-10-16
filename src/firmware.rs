@@ -24,7 +24,7 @@ pub struct Firmware {
 
 impl Default for Firmware {
     fn default() -> Self {
-        Firmware {
+        Self {
             efivars: false,
             secure_boot: None,
             setup_mode: None,
@@ -35,13 +35,13 @@ impl Default for Firmware {
 }
 
 impl Firmware {
-    pub fn read(root: &Path, owner: Option<&[u8]>) -> Firmware {
+    pub fn read(root: &Path, owner: Option<&[u8]>) -> Self {
         let Ok(entries) = std::fs::read_dir(root) else {
-            return Firmware::default();
+            return Self::default();
         };
-        let mut firmware = Firmware {
+        let mut firmware = Self {
             efivars: true,
-            ..Firmware::default()
+            ..Self::default()
         };
         let mut read_key = None;
         for entry in entries.flatten() {
@@ -110,7 +110,7 @@ mod tests {
 
     fn fixture(name: &str) -> std::path::PathBuf {
         let root =
-            std::env::temp_dir().join(format!("tect-firmware-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("buildc-firmware-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         root
     }

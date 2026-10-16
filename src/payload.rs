@@ -89,6 +89,10 @@ pub fn fuzz_readers(text: &str) {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "classify builds one value per run, so the large variant's size is paid once"
+)]
 pub enum Found {
     Image(Payload),
     Repo(PathBuf),

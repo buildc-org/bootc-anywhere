@@ -35,6 +35,23 @@ sector-size: 512
 /dev/vda3 : start=       83968, size=       40960, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"three\"
 ";
 
+fn running_as_root() -> bool {
+    // SAFETY: libc::geteuid has no precondition, so the call is sound.
+    unsafe { libc::geteuid() == 0 }
+}
+
+fn write_only(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
+}
+
+fn readable(path: &Path) -> Vec<u8> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::read(path).unwrap()
+}
+
 fn scratch(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("bootc-anywhere-{name}.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

@@ -140,14 +140,14 @@ fn stage_tpm2(
     pin: Option<&str>,
     writes: &mut Vec<EtcWrite>,
 ) -> Result<(), String> {
-    let key = format!("/etc/tect/tpm2-enroll-{name}.key");
+    let key = format!("/etc/buildc/tpm2-enroll-{name}.key");
     writes.push(EtcWrite {
         at: key.clone(),
         bytes: key_bytes_of(&open.key)?,
         mode: 0o600,
     });
     let pin_path = pin.map(|pin| {
-        let path = format!("/etc/tect/tpm2-enroll-{name}.pin");
+        let path = format!("/etc/buildc/tpm2-enroll-{name}.pin");
         writes.push(EtcWrite {
             at: path.clone(),
             bytes: pin.as_bytes().to_vec(),
@@ -156,7 +156,7 @@ fn stage_tpm2(
         path
     });
     writes.push(EtcWrite {
-        at: format!("/etc/systemd/system/tect-tpm2-enroll-{name}.service"),
+        at: format!("/etc/systemd/system/buildc-tpm2-enroll-{name}.service"),
         bytes: copy::tpm2_unit(name, &key, pin_path.as_deref(), uuid, pcr_policy).into_bytes(),
         mode: 0o644,
     });
@@ -278,7 +278,7 @@ pub(crate) fn deployment(root: &Path) -> Result<(PathBuf, bool), String> {
 
 pub(crate) fn merge_crypttab(etc: &Path, lines: &[(String, String)]) -> Result<(), String> {
     let at = etc.join("crypttab");
-    let held = std::fs::read_to_string(&at).unwrap_or_default();
+    let held = read_held(&at)?;
     let mut out: Vec<&str> = held
         .lines()
         .filter(|line| {
@@ -317,14 +317,24 @@ fn filesystem_uuid(device: &str) -> Result<String, String> {
     }
 }
 
+pub(crate) fn read_held(at: &Path) -> Result<String, String> {
+    match std::fs::read(at) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(format!("{}: {err}", at.display())),
+    }
+}
+
+pub(crate) fn read_lossy(at: &Path) -> Result<String, String> {
+    std::fs::read(at)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|err| format!("{}: {err}", at.display()))
+}
+
 pub(crate) fn merge_fstab(etc: &Path, uuid: &str) -> Result<(), String> {
     let at = etc.join("fstab");
     let source = format!("UUID={uuid}");
-    let held = match std::fs::read_to_string(&at) {
-        Ok(held) => held,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(format!("{}: {err}", at.display())),
-    };
+    let held = read_held(&at)?;
     let mut lines: Vec<&str> = held
         .lines()
         .filter(|line| line.split_whitespace().next() != Some(source.as_str()))
@@ -384,10 +394,6 @@ pub(crate) fn target_contexts(deployment: &Path) -> Result<Option<PathBuf>, Stri
     Ok(Some(contexts))
 }
 
-/// The LUKS UUID a container's header carries, which is how the installed
-/// machine names the container. The crypttab line writes it as `UUID=` and the
-/// TPM2 unit as `/dev/disk/by-uuid/`. Both forms survive the device
-/// renumbering between the live environment and the installed system.
 pub(crate) fn luks_uuid(partition: &str) -> Result<String, String> {
     let out = Command::new("cryptsetup")
         .args(["luksUUID", partition])
@@ -403,10 +409,6 @@ pub(crate) fn luks_uuid(partition: &str) -> Result<String, String> {
     }
 }
 
-/// One key added to a container, authenticated with the key that already
-/// opens it. The new key is passed in a file only `cryptsetup` reads, and the
-/// slot is explicit, so a caller can name the key it added. `data_volume`
-/// tests the new key before it treats the addition as done.
 pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), String> {
     let at = staged_key(key)?;
     let mut command = Command::new("cryptsetup");
@@ -418,9 +420,6 @@ pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), Stri
         .map_err(|why| format!("adding a key to {}: {why}", open.partition))
 }
 
-/// Names the first key slot a container can take. LUKS2 stops at slot 31, and
-/// an explicit slot is what lets a caller name the key it added even when the
-/// header cannot be read back.
 pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
     const SLOTS: u32 = 32;
     (0..SLOTS)
@@ -428,20 +427,13 @@ pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
         .ok_or_else(|| format!("all {SLOTS} key slots are in use"))
 }
 
-/// Builds `cryptsetup`'s arguments that authenticate one header operation.
-/// A passphrase and a data volume's key both arrive on stdin, so neither
-/// reaches the process list. A key file is named by its path, which
-/// `cryptsetup` reads itself.
 pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
     match key {
         Key::File(path) => vec!["--key-file".into(), path.as_os_str().to_os_string()],
-        _ => vec!["--key-file".into(), "-".into()],
+        Key::Passphrase(_) | Key::Data(_) => vec!["--key-file".into(), "-".into()],
     }
 }
 
-/// Runs a `cryptsetup` command that authenticates with `key`. The calling
-/// command has already built the argument vector, and `what` completes the
-/// sentence a spawn failure prints.
 pub(crate) fn run_with_key(mut command: Command, key: &Key, what: &str) -> Result<(), String> {
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     if key.bytes().is_some() {
@@ -477,20 +469,14 @@ impl Drop for StagedKey {
     }
 }
 
-/// Writes one key to a file only its reader can open. A secret that reaches
-/// the disk must live under a path the process owns and removes.
 pub(crate) fn staged_key(key: &[u8]) -> Result<StagedKey, String> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    // `create_new` fails if the path already exists, and `mode` applies from
-    // the file's first instant, so no other user can read the key at any
-    // moment.
     let at = std::env::temp_dir().join(format!(
-        "tect-luks-key.{}.{:x}",
+        "buildc-luks-key.{}.{:x}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0)
+            .map_or(0, |elapsed| elapsed.as_nanos())
     ));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -498,11 +484,6 @@ pub(crate) fn staged_key(key: &[u8]) -> Result<StagedKey, String> {
         .mode(0o600)
         .open(&at)
         .map_err(|err| format!("{}: {err}", at.display()))?;
-    // `create_new` above proves this process made the key file, so the guard
-    // can own it. The guard is taken before the first write, because a write
-    // that fails part-way leaves a prefix of the key on disk. The guard is a
-    // value rather than a later statement, because a panic unwinds past a
-    // statement.
     let at = StagedKey(at);
     file.write_all(key)
         .map_err(|err| format!("{}: {err}", at.0.display()))?;
@@ -510,9 +491,6 @@ pub(crate) fn staged_key(key: &[u8]) -> Result<StagedKey, String> {
     Ok(at)
 }
 
-/// A new key that opens a container with no user present. The key is 32
-/// random bytes written as hex, read from the kernel and taken from no
-/// dependency.
 pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
@@ -525,10 +503,6 @@ pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     Ok(said.into_bytes())
 }
 
-/// Sets an opened root container's partition type to `ROOT_GUID`, so the
-/// sealed UKI's initrd finds it. dm-crypt holds the partition busy, so this
-/// closes the container around the table write and opens it again with the
-/// same key.
 pub(crate) fn retag_root(layout: &CustomLayout) -> Result<(), String> {
     let opened = layout
         .mappers()
@@ -579,16 +553,6 @@ pub(crate) fn retag_root(layout: &CustomLayout) -> Result<(), String> {
     }
 }
 
-/// The GPT number of a partition device, taken as the trailing digits.
-/// `/dev/vda2`, `/dev/nvme0n1p2` and `/dev/mmcblk0p2` all give 2.
-///
-/// This answers a number rather than the digits it read, because every caller
-/// but two needs a number and the two that format it back are naming an
-/// `sfdisk` argument. While the digits and the number were separate steps the
-/// callers disagreed about which devices were numberable: the readers in
-/// `table.rs` dropped an entry whose digits overflow `usize` and `apply_cuts`
-/// accepted it, so a delete the editor screen had ignored was cut anyway and
-/// `sfdisk` refused it part way through the plan.
 pub(crate) fn partition_number(device: &str) -> Result<usize, String> {
     let digits: String = device
         .chars()

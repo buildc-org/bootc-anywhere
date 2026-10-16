@@ -59,7 +59,10 @@ fn swap_is_named_by_the_filesystem_device() {
         }],
         ..Default::default()
     };
-    assert_eq!(swap_device(&opened).as_deref(), Some("/dev/mapper/tect-1"));
+    assert_eq!(
+        swap_device(&opened).as_deref(),
+        Some("/dev/mapper/buildc-1")
+    );
 }
 
 #[test]
@@ -126,4 +129,61 @@ fn a_partition_number_is_the_trailing_digits() {
     assert_eq!(partition_number("/dev/mmcblk0p2").expect("a number"), 2);
     assert!(partition_number("/dev/vda").is_err());
     assert!(partition_number("/dev/sda99999999999999999999").is_err());
+}
+
+#[test]
+fn an_unreadable_crypttab_is_refused_and_kept() {
+    if running_as_root() {
+        return;
+    }
+    let root = scratch("crypttab-unreadable");
+    let etc = root.join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    let held = b"swap UUID=aa none swap\n";
+    write_only(&etc.join("crypttab"), held);
+    let lines = vec![("var".to_string(), "var UUID=new none luks".to_string())];
+    assert!(merge_crypttab(&etc, &lines).is_err());
+    assert_eq!(readable(&etc.join("crypttab")), held);
+}
+
+#[test]
+fn an_unreadable_loader_conf_is_refused_and_kept() {
+    if running_as_root() {
+        return;
+    }
+    let root = scratch("loader-unreadable");
+    let loader = root.join("loader.conf");
+    let held = b"timeout 3\n";
+    write_only(&loader, held);
+    assert!(enroll_force(&loader).is_err());
+    assert_eq!(readable(&loader), held);
+}
+
+#[test]
+fn a_crypttab_in_another_encoding_keeps_its_lines() {
+    let root = scratch("crypttab-latin1");
+    let etc = root.join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    std::fs::write(
+        etc.join("crypttab"),
+        b"# donn\xe9es\nhome UUID=bb none luks\n",
+    )
+    .unwrap();
+    let lines = vec![("var".to_string(), "var UUID=new none luks".to_string())];
+    merge_crypttab(&etc, &lines).unwrap();
+    let said = std::fs::read_to_string(etc.join("crypttab")).unwrap();
+    assert!(said.contains("home UUID=bb"), "{said}");
+    assert!(said.contains("var UUID=new"), "{said}");
+}
+
+#[test]
+fn enrolment_keeps_bootc_lines_and_replaces_its_own() {
+    let root = scratch("loader-merge");
+    let loader = root.join("loader.conf");
+    std::fs::write(&loader, "timeout 3\nsecure-boot-enroll manual\n").unwrap();
+    enroll_force(&loader).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&loader).unwrap(),
+        "timeout 3\nsecure-boot-enroll force\n"
+    );
 }

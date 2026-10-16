@@ -3,9 +3,7 @@ use super::*;
 const LOCK: &str = "/run/bootc-anywhere.lock";
 
 pub(crate) fn lock() -> PathBuf {
-    std::env::var_os("BUILDC_INSTALLER_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(LOCK))
+    std::env::var_os("BUILDC_INSTALLER_LOCK").map_or_else(|| PathBuf::from(LOCK), PathBuf::from)
 }
 
 pub(crate) fn console(pid: libc::pid_t) -> String {
@@ -34,6 +32,10 @@ pub fn hold() -> Result<std::fs::File, String> {
     hold_at(&lock())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`struct flock` holds the small `c_int` lock and seek constants as `c_short`"
+)]
 pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
     use std::os::fd::AsRawFd as _;
 
