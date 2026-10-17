@@ -7,7 +7,7 @@ fn the_bootc_call_mounts_the_store_and_passes_every_recipe_flag() {
     let raw = EMITTED.replace("\"bootloader\": \"grub2\"", "\"bootloader\": \"systemd\"");
     std::fs::write(&path, raw).expect("a recipe");
     let recipe = InstallRecipe::read(&path).expect("the emitted recipe is supported");
-    let command = bootc_command(&recipe, Some("rd.luks.name=abcd=tect-1"));
+    let command = bootc_command(&recipe, Some("rd.luks.name=abcd=buildc-1"));
     let args: Vec<String> = command
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -33,7 +33,7 @@ fn the_bootc_call_mounts_the_store_and_passes_every_recipe_flag() {
             "-v",
             "/etc/containers/storage.conf:/etc/containers/storage.conf:ro",
             "-v",
-            "/run/tect-sysroot:/target",
+            "/run/buildc-sysroot:/target",
             "ghcr.io/buildc-org/deb2:latest",
             "bootc",
             "install",
@@ -46,7 +46,7 @@ fn the_bootc_call_mounts_the_store_and_passes_every_recipe_flag() {
             "systemd",
             "--generic-image",
             "--karg",
-            "rd.luks.name=abcd=tect-1",
+            "rd.luks.name=abcd=buildc-1",
             "/target",
         ]
     );
@@ -187,7 +187,7 @@ fn the_last_screen_explains_the_two_actions() {
     let explained = &said[..window];
     let start = explained
         .iter()
-        .position(|line| line.starts_with("This reboots once"))
+        .position(|line| line.starts_with("The reboot unlocks"))
         .expect("the explanation is drawn");
     let paragraphs = copy::automatic_explanation();
     let joined = explained[start..]
@@ -209,7 +209,7 @@ fn the_last_screen_explains_the_two_actions() {
     );
     let second = explained
         .iter()
-        .position(|line| line.starts_with("Choose 'Manual' below"))
+        .position(|line| line.starts_with("The manual restart"))
         .expect("the manual paragraph is drawn");
     assert!(explained[second - 1].is_empty(), "a blank parts them");
     assert_eq!(said[window], copy::AUTO_WINDOW_PIN);
@@ -231,4 +231,58 @@ fn the_last_screen_explains_the_two_actions() {
         refused.last().is_some_and(|row| !row.warning),
         "an unavailable action draws no window"
     );
+}
+
+#[test]
+#[ignore]
+fn installs_from_the_payload_the_parent_staged() {
+    let root = PathBuf::from(
+        std::env::var("BUILDC_TEST_PAYLOAD")
+            .expect("the payload is staged only by its parent test"),
+    );
+    let Ok(Found::Image(payload)) = classify(&root) else {
+        panic!("the parent stages a payload");
+    };
+    let mut answers = answered(NONE, "");
+    answers.disk = "/dev/buildc-test-absent".to_string();
+    let refused = run(&payload, &mut answers, &Prompt::silent()).expect_err("an altered image");
+    std::fs::write(root.join("refused"), refused).expect("the child reports the refusal");
+}
+
+#[test]
+#[ignore]
+fn an_install_from_an_altered_image_is_refused_before_the_disk() {
+    let (root, conf) = imported_store("run-guard");
+    let inspected = in_store(inspect(STORED, "{{.Id}}"), &conf);
+    std::fs::write(root.join(IMAGE_ID), &inspected.stdout).expect("an image-id");
+    let graph = root.join("graph");
+    std::fs::write(
+        root.join(RECIPE),
+        format!(
+            "{{\"image\": \"{STORED}\", \"hostname\": \"host\", \"filesystem\": \"ext4\", \
+             \"bootloader\": \"grub2\", \"additionalImageStores\": [\"{}\"]}}",
+            graph.display()
+        ),
+    )
+    .expect("a recipe");
+    alter_layer(&root);
+
+    let child = Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "tests::run::installs_from_the_payload_the_parent_staged",
+        ])
+        .env("CONTAINERS_STORAGE_CONF", &conf)
+        .env("BUILDC_TEST_PAYLOAD", &root)
+        .output()
+        .expect("the test binary re-runs itself as the install");
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
+    let refused = std::fs::read_to_string(root.join("refused")).expect("the child's refusal");
+    assert!(refused.contains("does not read back"), "{refused}");
+    remove_store(&root);
 }

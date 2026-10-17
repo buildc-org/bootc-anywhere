@@ -51,6 +51,13 @@ pub(crate) fn panel_lines(
         Section(copy::PANEL_IMAGE.to_string()),
         Pair("name".to_string(), image_name(&payload.image)),
         Pair("repo".to_string(), payload.image.clone()),
+        match &payload.image_id {
+            Some(id) => Pair(copy::PANEL_IMAGE_ID.to_string(), id.short().to_string()),
+            None => Warn(
+                copy::PANEL_IMAGE_ID.to_string(),
+                copy::IMAGE_ID_UNRECORDED.to_string(),
+            ),
+        },
         Pair("bootloader".to_string(), bootloader_said(payload)),
         Section(copy::PANEL_FIRMWARE.to_string()),
     ];

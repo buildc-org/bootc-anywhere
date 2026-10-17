@@ -23,6 +23,27 @@ fn assert_style_at(rendered: &str, x: u16, y: u16, style: &str, what: &str) {
     assert!(line.contains(style), "{what} has the wrong style: {line}");
 }
 
+fn assert_style_on(rendered: &str, text: &str, style: &str, what: &str) {
+    let lines: Vec<&str> = rendered.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim() == "content: [")
+        .map(|at| at + 1)
+        .expect("the rendered screen has a content block");
+    let y = lines
+        .iter()
+        .skip(start)
+        .position(|line| line.contains(text))
+        .expect("the rendered screen holds the text");
+    assert_style_at(
+        rendered,
+        4,
+        u16::try_from(y).expect("a screen row fits u16"),
+        style,
+        what,
+    );
+}
+
 fn screen() -> Screen {
     Screen::full_screen(WIDTH, HEIGHT, copy::installing("deb2"))
 }
@@ -94,7 +115,7 @@ fn answers(complete: bool) -> Answers {
     Answers {
         disk: String::from(if complete { "/dev/vda" } else { "" }),
         hostname: String::from(if complete { "deb2" } else { "" }),
-        user: String::from(if complete { "tect" } else { "" }),
+        user: String::from(if complete { "buildc" } else { "" }),
         password: String::from(if complete { "hunter2" } else { "" }),
         encryption: Encryption {
             kind: NONE.to_string(),
@@ -161,7 +182,7 @@ fn the_install_form_snapshots_blocked_and_ready_states() {
     assert_style_at(
         &rendered,
         4,
-        17,
+        18,
         "fg: Rgb(238, 111, 248), bg: Reset, underline: Reset, modifier: BOLD",
         "the selected hostname row",
     );
@@ -375,10 +396,9 @@ fn the_leave_and_completion_screens_use_production_actions() {
             completion.len() - 1,
         ),
     );
-    assert_style_at(
+    assert_style_on(
         &rendered,
-        4,
-        33,
+        "finalize (automatic)",
         "modifier: DIM",
         "the unavailable automatic finalizer",
     );

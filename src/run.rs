@@ -5,15 +5,16 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(120);
 const STORAGE_CONF: &str = "/etc/containers/storage.conf";
 
 pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), String> {
-    require_signed_boot_chain(&payload.image, &payload.boot)?;
-    if answers.opened == Opened::Tpm2 || answers.encryption.kind.starts_with("tpm2-") {
-        require_tpm2_enrolment(&payload.image)?;
-    }
     validate_recipe(payload)?;
     if !portable_name(&answers.user) {
         return Err(copy::account_name(&answers.user));
     }
     let password_hash = hashed(&answers.password)?;
+    require_built_image(payload, prompt)?;
+    require_signed_boot_chain(&payload.image, &payload.boot)?;
+    if answers.opened == Opened::Tpm2 || answers.encryption.kind.starts_with("tpm2-") {
+        require_tpm2_enrolment(&payload.image)?;
+    }
     let mut prepared = prepare(payload, answers)?;
     let changes_table = prepared.layout.changes_table();
     installed(payload, answers, prompt, &password_hash, &mut prepared).map_err(|why| {
@@ -22,6 +23,71 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
             false => why,
         }
     })
+}
+
+fn require_built_image(payload: &Payload, prompt: &Prompt) -> Result<(), String> {
+    match &payload.image_id {
+        Some(recorded) => {
+            let inspected = inspect(&payload.image, "{{.Id}}")
+                .output()
+                .map_err(|err| format!("podman: {err}, and it is what checks the image ID"))?;
+            same_image(&payload.image, recorded, &inspected)?;
+        }
+        None if !prompt.draws() => eprintln!(
+            "{PROGRAM}: {} {}",
+            copy::PANEL_IMAGE_ID,
+            copy::IMAGE_ID_UNRECORDED
+        ),
+        None => {}
+    }
+    let mut child = read_back(&payload.image)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("podman: {err}, and it is what reads the image back"))?;
+    let pipe = child.stderr.take().expect("stderr was piped at spawn");
+    let drained = std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut said = String::new();
+        std::io::Read::read_to_string(&mut pipe, &mut said).map(|_| said)
+    });
+    let mut region = match prompt.draws() {
+        true => common::ui::Progress::open(copy::READING_BACK_FOOT).ok(),
+        false => None,
+    };
+    match &mut region {
+        Some(region) => {
+            let _ = region.step(0, 100, copy::READING_BACK);
+        }
+        None => eprintln!("{PROGRAM}: {}", copy::READING_BACK),
+    }
+    let waited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if let Some(region) = &mut region {
+                    let _ = region.tick();
+                }
+                std::thread::sleep(TICK);
+            }
+            Err(err) => break Err(err),
+        }
+    };
+    if let Some(region) = region {
+        region.close();
+    }
+    let status = waited.map_err(|err| {
+        let stopped = match child.kill() {
+            Ok(()) => String::new(),
+            Err(kill) => format!(", and stopping it failed too: {kill}"),
+        };
+        format!("podman: {err}, and it is what reads the image back{stopped}")
+    })?;
+    let stderr = drained
+        .join()
+        .map_err(|_| "podman: the thread reading its errors stopped".to_string())?
+        .map_err(|err| format!("podman: {err}"))?;
+    read_whole(&payload.image, status, &stderr)
 }
 
 fn installed(

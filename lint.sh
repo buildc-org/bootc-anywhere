@@ -13,13 +13,20 @@ fi
 mapfile -t crate_src < <(find . \( -path ./target -o -path ./fuzz/target \) -prune -o \
     -name '*.rs' -type f -print)
 
-if grep -nE '\buse +(::)?tect\b|\bextern +crate +tect\b|(^|[^A-Za-z0-9_:])tect::' "${crate_src[@]}"; then
-    echo "lint: the installer naming the tect crate, which it does not depend on" >&2
+# This check covers every source form that the dependency graph cannot see: an
+# import, a renaming import, an `extern crate`, or a path written at the call
+# site whose import sits in another file.
+if grep -nE '\buse +(::)?buildc\b|\bextern +crate +buildc\b|(^|[^A-Za-z0-9_:])buildc::' "${crate_src[@]}"; then
+    echo "lint: the installer naming the buildc crate, which it does not depend on" >&2
     exit 1
 fi
 
-if grep -nE 'Command::new\("[^"]*tect"|"/usr/bin/tect"' "${crate_src[@]}"; then
-    echo "lint: the installer running the tect binary, which media may not carry" >&2
+# And a reach that is not a dependency at all: spawning the other binary. Only
+# the two spawn forms, because the bare word `buildc` is all over this crate as a
+# username fixture, a mount point and a unit name on the *installed* machine,
+# and none of those is this crate calling that one.
+if grep -nE 'Command::new\("[^"]*buildc"|"/usr/bin/buildc"' "${crate_src[@]}"; then
+    echo "lint: the installer running the buildc binary, which media may not carry" >&2
     exit 1
 fi
 
@@ -50,7 +57,12 @@ echo "lint: clippy accepts every target"
 cargo nextest run --locked
 echo "lint: the installer does what it did"
 
-cargo build --quiet
+# `PROGRAM` is a constant interpolated into `format!`, so a message built as a
+# plain `&str` keeps the braces and tells a person to run `{PROGRAM}`. A
+# literal in the built binary is the one reliable tell: `format!` stores the
+# pieces either side of the hole, a plain string stores the hole. This caught
+# `lock.rs`'s second refusal, which two tests passed straight through.
+cargo build --quiet --locked
 if strings target/debug/bootc-anywhere | grep -n '{PROGRAM}'; then
     echo "lint: a message carries {PROGRAM} uninterpolated, so it is not in a format!" >&2
     exit 1

@@ -11,31 +11,31 @@ pub const ENC_PASSPHRASE: &str = "LUKS with passphrase";
 pub const ENC_BOTH: &str = "LUKS with TPM2 + recovery passphrase";
 pub const ENC_TPM2_PIN: &str = "LUKS with TPM2 + PIN";
 pub const NO_TPM: &str = "No TPM available";
-pub const NO_LUKS_INITRAMFS: &str = "the image has not declared and proved `luks-initramfs`";
+pub const NO_LUKS_INITRAMFS: &str = "this image has no luks-initramfs support for encryption";
 pub const REMOVABLE: &str = "removable";
 
 pub const NO_ROOT_FILESYSTEM: &str =
-    "the recipe names no `filesystem`, and the whole-disk layout formats the root with it";
+    "the whole-disk layout cannot format the root without a `filesystem` in the recipe";
 
 pub fn unknown_bootloader(bootloader: &str) -> String {
-    format!("the recipe's `bootloader` is {bootloader:?}; the installer lays out a disk for `grub2` or `systemd`")
+    format!("the recipe's `bootloader` is {bootloader:?}. Set it to `grub2` or `systemd`.")
 }
 
 pub fn unformattable(fstype: &str, target: &str) -> String {
-    format!("{target} cannot be formatted as {fstype:?}; the installer writes btrfs, ext4, xfs and fat32")
+    format!("the installer cannot format {target} as {fstype:?}. Choose btrfs, ext4, xfs or fat32.")
 }
 
-pub const CUSTOM_ROOT: &str = "still needs a / partition";
-pub const CUSTOM_ESP: &str = "still needs a /boot/efi partition";
-pub const CUSTOM_ROOT_KEPT: &str = "the / partition must be formatted";
-pub const CUSTOM_LUKS_LATER: &str = "manual LUKS is not installed yet; use the whole disk";
-pub const CUSTOM_VERITY: &str = "the image needs fs-verity: format the root ext4 or btrfs";
+pub const CUSTOM_ROOT: &str = "the plan has no root mount. Assign one.";
+pub const CUSTOM_ESP: &str = "the plan has no ESP mount. Assign one.";
+pub const CUSTOM_ROOT_KEPT: &str = "the root is kept unformatted. Format it.";
+pub const CUSTOM_LUKS_LATER: &str = "manual layout cannot create LUKS. Choose whole disk.";
+pub const CUSTOM_VERITY: &str = "fs-verity needs an ext4 or btrfs root. Choose one.";
 pub const INSTALLATION_DISK: &str = "installation disk";
-pub const CUSTOM_DUPLICATE: &str = "each mount point can be used only once";
-pub const CUSTOM_UNMOUNTED: &str = "a partition is answered with no mount point";
-pub const CUSTOM_UNFORMATTED: &str = "a new partition has no filesystem chosen";
+pub const CUSTOM_DUPLICATE: &str = "a mount point appears twice. Each may appear once.";
+pub const CUSTOM_UNMOUNTED: &str = "a planned partition has no mount point. Assign one.";
+pub const CUSTOM_UNFORMATTED: &str = "a created partition has no filesystem. Choose a format.";
 pub fn table_already_changed(disk: &str) -> String {
-    format!("the partition table on {disk} has already been changed")
+    format!("the partition table on {disk} changed before the write. Review the disk again.")
 }
 
 pub fn no_mkfs(program: &str, fstype: &str) -> String {
@@ -43,13 +43,13 @@ pub fn no_mkfs(program: &str, fstype: &str) -> String {
 }
 
 pub fn root_type_needs_gpt(disk: &str) -> String {
-    format!(
-        "{disk} needs a GPT partition table, because this image finds its root by partition type"
-    )
+    format!("the image finds its root by partition type. {disk} must use a GPT table.")
 }
 
 pub fn account_name(user: &str) -> String {
-    format!("the username {user:?} needs lowercase letters, digits, `_` or `-`, starting with a letter or `_`")
+    format!(
+        "the username {user:?} is invalid. Start with a lowercase letter or `_`. Then use lowercase letters, digits, `_` or `-`."
+    )
 }
 
 pub fn table_changed(disk: &str) -> String {
@@ -57,24 +57,24 @@ pub fn table_changed(disk: &str) -> String {
 }
 
 pub fn custom_not_gpt(label: &str) -> String {
-    format!("this disk has a {label} partition table: clear it to use GPT")
+    format!("this disk has a {label} partition table. Clear it to use GPT.")
 }
 
 pub fn esp_entry_name(entry: &str) -> String {
-    format!("`{entry}` is not one entry name under EFI")
+    format!("`{entry}` is not a single path component under EFI")
 }
 
 pub fn esp_entry_missing(path: &str, why: &str) -> String {
-    format!("{path} is not on the ESP: {why}")
+    format!("{path} is not on the ESP. {why}")
 }
 
 pub fn esp_entry_remove(path: &str, why: &str) -> String {
-    format!("removing {path}: {why}")
+    format!("the installer could not remove {path}. {why}")
 }
 pub fn custom_too_big(gb: u64) -> String {
     match gb {
-        0 => "no room left on the disk for a new partition".to_string(),
-        gb => format!("only {gb} GB is free in the largest free region"),
+        0 => "the disk has no room for a new partition".to_string(),
+        gb => format!("the largest free region holds {gb} GB. Choose a smaller partition."),
     }
 }
 
@@ -86,13 +86,13 @@ pub fn opened_root(partition: &str, fstype: &str, how: &str) -> String {
     format!("{partition}  format as {fstype} inside, {how}")
 }
 
-pub const OPENED_KEEP: &str = "keep what is enrolled";
+pub const OPENED_KEEP: &str = "keep the enrolled keys";
 pub const OPENED_TPM2: &str = "add a TPM2 token";
 pub const OPENED_ADD_KEY: &str = "add a key file for boot";
-pub const OPENED_TPM2_COST: &str = "first boot asks once, then no prompt";
-pub const OPENED_TPM2_HAS: &str = "this container already has one";
-pub const OPENED_ADD_KEY_COST: &str = "this machine reads it, the old one keeps its own";
-pub const OPENED_KEYFILE_PLAIN: &str = "the root is not encrypted, so the key would be readable";
+pub const OPENED_TPM2_COST: &str = "prompts on the first boot only";
+pub const OPENED_TPM2_HAS: &str = "the LUKS container already has a TPM2 token";
+pub const OPENED_ADD_KEY_COST: &str = "the added key boots this machine beside the current key";
+pub const OPENED_KEYFILE_PLAIN: &str = "a key file on an unencrypted root is readable";
 pub const OPENED_ROOT_KEYFILE: &str = "a key file cannot open the root; use its passphrase";
 
 pub fn slots_said(keys: &[u32], tokens: &[String]) -> String {
@@ -111,21 +111,21 @@ pub fn slots_unknown(why: &str) -> String {
     format!("its slots could not be read: {why}")
 }
 
-pub const BOOT_KEYFILE: &str = "decrypted, keyfile at boot";
-pub const BOOT_PASSPHRASE: &str = "decrypted, passphrase at boot";
-pub const BOOT_TPM2: &str = "decrypted, TPM2 at boot";
-pub const BOOT_ADDED_KEY: &str = "decrypted, key added here";
+pub const BOOT_KEYFILE: &str = "decrypted by a key file at boot";
+pub const BOOT_PASSPHRASE: &str = "decrypted by a passphrase at boot";
+pub const BOOT_TPM2: &str = "decrypted by TPM2 at boot";
+pub const BOOT_ADDED_KEY: &str = "decrypted by the key added here";
 
 pub fn kill_slot(device: &str, slot: u32, count: usize) -> Vec<String> {
     vec![
-        format!("{device} has {count} slots, and this machine no longer needs slot {slot}"),
-        format!("both keys open it, so it can go: cryptsetup luksKillSlot {device} {slot}"),
+        format!("{device} has {count} slots. This machine no longer needs slot {slot}."),
+        format!("either key opens the device. Remove the slot with cryptsetup luksKillSlot {device} {slot}."),
     ]
 }
 
 pub fn kill_a_slot(device: &str, count: usize) -> Vec<String> {
     vec![
-        format!("{device} has {count} slots, and this machine no longer needs one of them"),
+        format!("{device} has {count} slots. This machine no longer needs one of them."),
         format!("cryptsetup luksKillSlot {device} <slot>"),
     ]
 }
@@ -134,7 +134,7 @@ pub fn crypttab_line(name: &str, uuid: &str, keyfile: Option<&str>) -> String {
     format!("{name} UUID={uuid} {} luks", keyfile.unwrap_or("none"))
 }
 
-pub const ENROLLING: &str = "enrolling disk auto-unlock; this takes a few seconds";
+pub const ENROLLING: &str = "Enrolling TPM2 disk unlock takes a few seconds";
 
 pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 
@@ -203,7 +203,7 @@ pub fn tpm2_unit(name: &str, key: &str, pin: Option<&str>, uuid: &str, pcr_polic
          ExecStart=/bin/bash -c '{script}'\n\
          ExecStartPost=-/usr/bin/shred -u {key}\n\
          {shred_pin}\
-         ExecStartPost=-/usr/bin/systemctl disable tect-tpm2-enroll-{name}.service\n\
+         ExecStartPost=-/usr/bin/systemctl disable buildc-tpm2-enroll-{name}.service\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n"
@@ -226,22 +226,22 @@ pub const SUBMIT_KEYS: &str = "\u{23ce}  submit \u{2022} Esc back \u{2022} Alt+S
 pub const KEY_PASSPHRASE: &str = "passphrase";
 pub const KEY_FILE: &str = "key file";
 pub const KEY_FILE_PATH: &str = "key file path";
-pub const KEY_FILE_MISSING: &str = "there is no file at that path";
+pub const KEY_FILE_MISSING: &str = "no file exists at this path. Choose an existing file.";
 pub const ENCRYPTED_DISK: &str = "encrypted disk";
 pub const ENCRYPTED_PARTITION: &str = "encrypted partition";
 
-pub const OLD_ROOT_NONE: &str = "no partition on this disk reads as an old system";
+pub const OLD_ROOT_NONE: &str = "no partition on this disk holds an old system";
 pub fn old_root_unnamed(partition: &str) -> String {
-    format!("no old system on this disk names a key for {partition}")
+    format!("no old system on this disk has a key for {partition}")
 }
 pub fn old_root_partly(unread: &str) -> String {
-    format!("{unread}, and nothing readable named a key")
+    format!("{unread}. No readable system names a key.")
 }
 pub fn old_root_key_missing(volume: &str, at: &str, why: &str) -> String {
-    format!("the key {at} that opens {volume} could not be read: {why}")
+    format!("the installer could not read the key {at} for {volume}. {why}")
 }
 pub fn old_root_key_outside(at: &str) -> String {
-    format!("the key {at} is not a file inside the system that names it")
+    format!("the key {at} is outside the old system that names it")
 }
 pub fn old_root_key_wrong(partition: &str) -> String {
     format!("the key the old system named for {partition} does not open it")
@@ -250,11 +250,11 @@ pub fn old_root_key_unreadable(volume: &str) -> String {
     format!("{volume} opens with a script this installer cannot run")
 }
 pub fn old_root_key_removable(volume: &str) -> String {
-    format!("{volume} opens with a key file on removable media, which this installer does not copy onto the machine")
+    format!("the key for {volume} is on removable media. This installer does not copy it to the machine.")
 }
 
 pub fn old_root_key_waited(volume: &str) -> String {
-    format!("{volume} waits for its key file at boot, which this installer does not configure")
+    format!("{volume} waits for its key file at boot. This installer does not configure that.")
 }
 
 pub fn custom_keep_boot(bootloader: &str) -> String {
@@ -269,25 +269,25 @@ pub fn erasing(disk: &str) -> String {
 }
 
 pub fn changing_partitions(disk: &str) -> String {
-    format!("Erase the partitions marked format on {disk}? This cannot be undone.")
+    format!("Format the marked partitions on {disk}? This erases them and cannot be undone.")
 }
 
 pub fn removing_partitions(disk: &str, count: usize) -> String {
     match count {
-        1 => format!("DELETE 1 partition on {disk}? Its contents are lost."),
-        count => format!("DELETE {count} partitions on {disk}? Their contents are lost."),
+        1 => format!("Delete 1 partition on {disk}? Its contents are lost."),
+        count => format!("Delete {count} partitions on {disk}? Their contents are lost."),
     }
 }
 
 pub fn summary_deleted(partition: &str) -> String {
-    format!("{partition}  DELETED, contents lost")
+    format!("{partition}  contents are lost")
 }
 
 pub fn summary_esp(entry: &str, partition: &str) -> String {
     format!("{entry} boot entry on {partition} is removed")
 }
 pub fn summary_created(gb: u64, fstype: &str) -> String {
-    format!("a new {gb} GB partition, format as {fstype}")
+    format!("{gb} GB  new {fstype} partition")
 }
 pub const ROW_REMOVED: &str = "removed";
 pub const ROW_CREATED: &str = "created";
@@ -333,15 +333,15 @@ pub const CREATE_PART: &str = "Create partition";
 pub const RENAME_PART: &str = "Rename";
 pub const NEW_PARTITION: &str = "create partition";
 pub const NEW_NAME: &str = "name";
-pub const NAME_NEEDED: &str = "a name is needed";
+pub const NAME_NEEDED: &str = "enter a partition name";
 pub const ROW_OFFSET: &str = "Start offset";
 pub const ROW_PARTITION_SIZE: &str = "Partition size";
 pub const ROW_AVAILABLE: &str = "Available";
-pub const NEW_SIZE_NEEDED: &str = "a size is needed";
+pub const NEW_SIZE_NEEDED: &str = "enter a partition size";
 pub const CELL_REMOVE: &str = "remove";
 pub const CELL_NEW: &str = "new";
 pub fn clear_all(count: usize) -> String {
-    format!("plan to remove all {count} partitions on this disk?")
+    format!("Clear all {count} partitions on this disk?")
 }
 pub const OPEN_ENCRYPTED: &str = "Open Encrypted Partition";
 pub const CLOSE_ENCRYPTED: &str = "Close Encrypted Partition";
@@ -403,7 +403,10 @@ pub fn written_over(bootloader: &str, filesystem: &str) -> Vec<(String, String)>
         let boot = crate::BOOT_GB.to_string();
         rows.push(("/boot".to_string(), format!("{}  ext4", size_said(&boot))));
     }
-    rows.push(("root".to_string(), format!("the rest  {filesystem}")));
+    rows.push((
+        "root".to_string(),
+        format!("the remaining disk  {filesystem}"),
+    ));
     rows
 }
 pub const ROW_DISK: &str = "disk";
@@ -428,10 +431,14 @@ pub fn installing(image: &str) -> String {
 pub fn logging(log: Option<&std::path::Path>) -> String {
     match log {
         Some(at) => format!("the install log is at {}", at.display()),
-        None => "nothing here is writable, so this screen is the only copy".to_string(),
+        None => "no log location is writable. This screen is the only copy.".to_string(),
     }
 }
 
+pub const PANEL_IMAGE_ID: &str = "image ID";
+pub const IMAGE_ID_UNRECORDED: &str = "the recipe has no image ID. The installer cannot check it.";
+pub const READING_BACK: &str = "Reading the image back before the disk is written";
+pub const READING_BACK_FOOT: &str = "no disk written yet; Ctrl+C stops the install here";
 pub fn writing(log: Option<&std::path::Path>) -> String {
     match log {
         Some(at) => format!("disk being overwritten; log: {}", at.display()),
@@ -464,27 +471,24 @@ pub const FINALIZE_AUTO: &str = "Restart and finalize (automatic)";
 pub const FINALIZE_MANUAL: &str = "Restart and finalize (manual)";
 pub fn automatic_explanation() -> [&'static str; 2] {
     [
-        "This reboots once to enrol LUKS with the TPM. A temporary TPM-encrypted \
-         key is staged on the ESP and unlocks the disk on the next boot; the first \
-         boot then enrols the TPM, removes the temporary key entry from LUKS and \
-         deletes the temporary key before restarting.",
-        "Choose 'Manual' below to unlock the next boot with the recovery key \
-         instead.",
+        "The reboot unlocks the disk with a temporary TPM-sealed key. The first \
+         boot enrolls the TPM and deletes the temporary key.",
+        "The manual restart uses the recovery key to unlock the next boot.",
     ]
 }
-pub const AUTO_WINDOW: &str = "until then this key opens the disk without a passphrase";
-pub const AUTO_WINDOW_PIN: &str = "until then this key opens the disk without the PIN";
+pub const AUTO_WINDOW: &str = "the disk opens without a passphrase until the first boot";
+pub const AUTO_WINDOW_PIN: &str = "the disk opens without the PIN until the first boot";
 pub const AUTO_NO_STUB: &str = "the image does not boot through systemd-stub";
 pub const AUTO_NO_POLICY: &str = "the image has no signed PCR policy to seal to";
 pub const AUTO_NO_ROOT: &str = "no encrypted root was found";
 pub const AUTO_FAILED: &str = "the automatic finalize failed; choose manual restart";
 
 pub fn next_steps_setup() -> &'static str {
-    "Before the installed image boots, set secure boot to 'setup mode'. The steps are vendor specific: often set secure boot to 'custom', then delete the existing platform key (PK)."
+    "Set secure boot to setup mode before the installed image boots. The vendor steps often clear the platform key (PK)."
 }
 
 pub fn shim_steps() -> &'static str {
-    "On first boot, use MokManager to enrol EFI/BOOT/MOK.cer; no firmware change is needed."
+    "MokManager enrolls EFI/BOOT/MOK.cer on the first boot. The firmware stays unchanged."
 }
 
 pub const PANEL_IMAGE: &str = "OS Image";
@@ -497,26 +501,26 @@ pub const FIRMWARE_SECURE: &str = "secure boot";
 pub const FIRMWARE_ON: &str = "on";
 pub const FIRMWARE_OFF: &str = "off";
 pub const FIRMWARE_SETUP: &str = "off (setup mode)";
-pub const FIRMWARE_UNREADABLE: &str = "state unreadable";
+pub const FIRMWARE_UNREADABLE: &str = "could not be read";
 pub const PLATFORM_KEY: &str = "platform key";
 pub const PLATFORM_KEY_SETUP: &str = "none (setup mode)";
-pub const PLATFORM_KEY_PRESENT: &str = "existing";
-pub const PLATFORM_KEY_OWNER: &str = "the owner key";
+pub const PLATFORM_KEY_PRESENT: &str = "a key other than the image owner's";
+pub const PLATFORM_KEY_OWNER: &str = "the image owner's key";
 pub const PLATFORM_KEY_UNKNOWN: &str = "could not be read";
-pub const UKI_NEEDS_UEFI: &str = "this image needs a UEFI boot, and none was found";
+pub const UKI_NEEDS_UEFI: &str = "the image needs UEFI. This firmware has none.";
 pub const UKI_DB_ENROLL: &str = "the image enrolls its owner key on first boot";
 pub const UKI_DB_OWNER: &str = "the owner key is enrolled; nothing to change";
 
 pub fn required_uki_db() -> [&'static str; 3] {
     [
-        "Secure boot with the systemd-boot bootloader needs the image's platform key set in this system's UEFI.",
+        "Secure boot with systemd-boot needs the image's platform key in the firmware.",
         "",
         "The existing platform key is deleted, so any existing OS here stops booting with secure boot on.",
     ]
 }
 
-pub const ERASE_WARNING_SECURE_BOOT: &str = "secure boot: the platform key must be cleared";
-pub const ERASE_WARNING_UEFI_SETUP: &str = "afterwards, in UEFI setup: Custom mode";
+pub const ERASE_WARNING_SECURE_BOOT: &str = "Secure boot requires clearing the platform key.";
+pub const ERASE_WARNING_UEFI_SETUP: &str = "After the install, set the firmware to Custom mode.";
 
 pub const NONE: &str = "none";
 
@@ -563,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_pcr_policy_tpm2_unit_names_the_embedded_files() {
-        let policy = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", true);
+        let policy = super::tpm2_unit("root", "/etc/buildc/tpm2-enroll-root.key", None, "u", true);
         assert!(policy.contains("--tpm2-pcrs=7"), "{policy}");
         assert!(
             policy.contains("--tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem"),
@@ -573,7 +577,7 @@ mod tests {
             policy.contains("--tpm2-signature=/run/systemd/tpm2-pcr-signature.json"),
             "{policy}"
         );
-        let other = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
+        let other = super::tpm2_unit("root", "/etc/buildc/tpm2-enroll-root.key", None, "u", false);
         assert!(other.contains("--tpm2-pcrs=7"), "{other}");
         assert!(!other.contains("tpm2-pcr-public-key"), "{other}");
         assert!(!other.contains("tpm2-with-pin"), "{other}");
@@ -582,7 +586,7 @@ mod tests {
 
     #[test]
     fn a_tpm2_unit_runs_before_any_login_and_says_so() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
+        let unit = super::tpm2_unit("root", "/etc/buildc/tpm2-enroll-root.key", None, "u", false);
         assert!(
             unit.contains("Before=systemd-user-sessions.service"),
             "{unit}"
@@ -603,7 +607,13 @@ mod tests {
 
     #[test]
     fn a_tpm2_unit_cleans_up_an_automatic_finalize() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "abcd", true);
+        let unit = super::tpm2_unit(
+            "root",
+            "/etc/buildc/tpm2-enroll-root.key",
+            None,
+            "abcd",
+            true,
+        );
         assert!(unit.contains(&format!("\"{}\"", super::ESP_TYPE)), "{unit}");
         assert!(
             unit.contains("loader/credentials/cryptsetup.slot"),
@@ -615,7 +625,7 @@ mod tests {
         );
         assert!(unit.contains("--wipe-slot=$slot"), "{unit}");
         assert!(
-            unit.contains("--unlock-key-file=/etc/tect/tpm2-enroll-root.key $wipe"),
+            unit.contains("--unlock-key-file=/etc/buildc/tpm2-enroll-root.key $wipe"),
             "{unit}"
         );
         assert!(unit.contains("for i in 1 2 3 4 5"), "{unit}");
@@ -630,18 +640,20 @@ mod tests {
     fn a_pin_unit_loads_and_shreds_the_pin() {
         let unit = super::tpm2_unit(
             "root",
-            "/etc/tect/tpm2-enroll-root.key",
-            Some("/etc/tect/tpm2-enroll-root.pin"),
+            "/etc/buildc/tpm2-enroll-root.key",
+            Some("/etc/buildc/tpm2-enroll-root.pin"),
             "abcd",
             false,
         );
         assert!(unit.contains("--tpm2-with-pin=yes"), "{unit}");
         assert!(
-            unit.contains("LoadCredential=cryptenroll.new-tpm2-pin:/etc/tect/tpm2-enroll-root.pin"),
+            unit.contains(
+                "LoadCredential=cryptenroll.new-tpm2-pin:/etc/buildc/tpm2-enroll-root.pin"
+            ),
             "{unit}"
         );
         assert!(
-            unit.contains("ExecStartPost=-/usr/bin/shred -u /etc/tect/tpm2-enroll-root.pin"),
+            unit.contains("ExecStartPost=-/usr/bin/shred -u /etc/buildc/tpm2-enroll-root.pin"),
             "{unit}"
         );
     }

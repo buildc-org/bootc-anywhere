@@ -2,6 +2,8 @@ use super::*;
 
 pub const RECIPE: &str = "install-recipe.json";
 
+pub const IMAGE_ID: &str = "image-id";
+
 pub fn media() -> PathBuf {
     Path::new(crate::BUILD_MANIFEST)
         .parent()
@@ -14,6 +16,7 @@ pub struct Payload {
     pub recipe: PathBuf,
     pub(crate) install: InstallRecipe,
     pub image: String,
+    pub image_id: Option<ImageId>,
     pub hostname: String,
     pub filesystem: String,
     pub bootloader: String,
@@ -64,11 +67,7 @@ pub(crate) fn root_reserve(image_gb: &Option<u64>) -> u64 {
 }
 
 fn image_gb(image: &str) -> Option<u64> {
-    let out = Command::new("podman")
-        .args(["image", "inspect", "--format", "{{.Size}}"])
-        .arg(image)
-        .output()
-        .ok()?;
+    let out = inspect(image, "{{.Size}}").output().ok()?;
     match out.status.success() {
         true => image_size(&String::from_utf8_lossy(&out.stdout)),
         false => None,
@@ -105,7 +104,7 @@ impl Found {
             Self::Image(payload) => Ok(payload),
             Self::Repo(root) => Err(format!(
                 "{} is a repository, so there is nothing here to install yet\n\nhelp: \
-                 `tect build` in it, then `{PROGRAM} --from <the built payload>`",
+                 `buildc build` in it, then `{PROGRAM} --from <the built payload>`",
                 root.display()
             )),
             Self::Nothing(root) => Err(format!(
@@ -123,6 +122,7 @@ pub fn classify(root: &Path) -> Result<Found, String> {
         let install = InstallRecipe::read(&recipe)?;
         return Ok(Found::Image(Payload {
             image: install.image.clone(),
+            image_id: recorded_id(root)?,
             hostname: install.hostname.clone(),
             filesystem: install.filesystem.clone(),
             bootloader: install.bootloader.clone(),
@@ -141,9 +141,108 @@ pub fn classify(root: &Path) -> Result<Found, String> {
     })
 }
 
-pub const LABEL: &str = "TECT";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageId(String);
 
-pub(crate) const MOUNTPOINT: &str = "/run/tect-payload";
+impl ImageId {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        let digits =
+            text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        digits.then(|| Self(text.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn short(&self) -> &str {
+        &self.0[..12]
+    }
+}
+
+pub(crate) fn recorded_id(root: &Path) -> Result<Option<ImageId>, String> {
+    let path = root.join(IMAGE_ID);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    let id = raw.trim();
+    ImageId::parse(id).map(Some).ok_or_else(|| {
+        format!(
+            "{}: `{id}` is not an image ID, which is 64 lowercase hex digits",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn inspect(image: &str, format: &str) -> Command {
+    let mut command = Command::new("podman");
+    command.args(["image", "inspect", "--format", format, image]);
+    command
+}
+
+pub(crate) fn same_image(
+    image: &str,
+    recorded: &ImageId,
+    inspected: &std::process::Output,
+) -> Result<(), String> {
+    if !inspected.status.success() {
+        return Err(format!(
+            "podman cannot inspect {image}: {}",
+            String::from_utf8_lossy(&inspected.stderr).trim()
+        ));
+    }
+    let found = String::from_utf8_lossy(&inspected.stdout)
+        .trim()
+        .to_string();
+    match found == recorded.as_str() {
+        true => Ok(()),
+        false => Err(format!(
+            "{image} is image {found}, and this media was built to install {}; \
+             rebuild the media with `buildc vm build iso`",
+            recorded.as_str()
+        )),
+    }
+}
+
+pub(crate) fn read_back(image: &str) -> Command {
+    let mut command = Command::new("podman");
+    command.args([
+        "save",
+        "--quiet",
+        "--format",
+        "docker-archive",
+        "--output",
+        "/dev/stdout",
+        image,
+    ]);
+    command
+}
+
+pub(crate) fn read_whole(
+    image: &str,
+    status: std::process::ExitStatus,
+    stderr: &str,
+) -> Result<(), String> {
+    let said = stderr.trim();
+    match (status.success(), said.contains("no space left on device")) {
+        (true, _) => Ok(()),
+        (false, true) => Err(format!(
+            "reading {image} back needs free space as large as its largest layer, and the \
+             temporary directory ran out: {said}\n\nhelp: set TMPDIR to a directory with \
+             room, or use a machine with more memory, where this environment keeps /var/tmp"
+        )),
+        (false, false) => Err(format!(
+            "{image} does not read back as the bytes it was stored with: {said}; rebuild \
+             the media with `buildc vm build iso`"
+        )),
+    }
+}
+
+pub const LABEL: &str = "PAYLOAD";
+
+pub(crate) const MOUNTPOINT: &str = "/run/buildc-payload";
 
 pub fn root() -> Result<PathBuf, String> {
     let listed = Command::new("blkid")

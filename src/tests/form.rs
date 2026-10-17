@@ -68,7 +68,7 @@ fn the_whole_disk_form_refuses_a_seeded_tpm2_kind_without_a_tpm() {
     use common::ui::{Choice, Field};
     let fields = vec![
         Field::text(copy::ROW_HOSTNAME, "deb2"),
-        Field::text(copy::ROW_ACCOUNT, "tect"),
+        Field::text(copy::ROW_ACCOUNT, "buildc"),
         Field::secret(copy::ROW_PASSWORD, "hunter2"),
         Field::secret(copy::ROW_CONFIRM, "hunter2"),
         Field::pick(
@@ -113,7 +113,7 @@ fn the_whole_disk_form_refuses_a_seeded_pin_kind_with_no_pin() {
     use common::ui::{Choice, Field};
     let fields = vec![
         Field::text(copy::ROW_HOSTNAME, "deb2"),
-        Field::text(copy::ROW_ACCOUNT, "tect"),
+        Field::text(copy::ROW_ACCOUNT, "buildc"),
         Field::secret(copy::ROW_PASSWORD, "hunter2"),
         Field::secret(copy::ROW_CONFIRM, "hunter2"),
         Field::pick(
@@ -155,7 +155,7 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
     let answers = Answers {
         disk: "/dev/vda".to_string(),
         hostname: "deb2".to_string(),
-        user: "tect".to_string(),
+        user: "buildc".to_string(),
         password: "hunter2".to_string(),
         opened: Opened::Keep,
         encryption: Encryption {
@@ -166,23 +166,11 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
         layout: None,
     };
     assert_eq!(
-        answers.summary(&Payload {
-            recipe: "/mnt/tect/install-recipe.json".into(),
-            install: an_install_recipe(),
-            image: "ghcr.io/buildc-org/deb2:latest".to_string(),
-            hostname: "deb2".to_string(),
-            filesystem: "ext4".to_string(),
-            bootloader: "grub2".to_string(),
-            boot: String::new(),
-            composefs: false,
-            reserve: std::sync::OnceLock::new(),
-            luks_initramfs: true,
-            esp_entries: std::sync::OnceLock::new(),
-        }),
+        answers.summary(&a_payload()),
         vec![
             (copy::ROW_DISK.to_string(), "/dev/vda".to_string()),
             (copy::ROW_HOSTNAME.to_string(), "deb2".to_string()),
-            (copy::ROW_ACCOUNT.to_string(), "tect".to_string()),
+            (copy::ROW_ACCOUNT.to_string(), "buildc".to_string()),
             (
                 copy::ROW_PASSWORD.to_string(),
                 copy::PASSWORD_SET.to_string()
@@ -190,7 +178,7 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
             (copy::ROW_ENCRYPTION.to_string(), copy::ENC_NONE.to_string()),
             ("esp".to_string(), "2.0 GB  fat32".to_string()),
             ("/boot".to_string(), "2.0 GB  ext4".to_string()),
-            ("root".to_string(), "the rest  ext4".to_string()),
+            ("root".to_string(), "the remaining disk  ext4".to_string()),
         ]
     );
     let question = copy::erasing(&answers.disk);
@@ -207,7 +195,7 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
     let form = |manual: bool, encryption: Field| {
         vec![
             Field::text(copy::ROW_HOSTNAME, "deb2"),
-            Field::text(copy::ROW_ACCOUNT, "tect"),
+            Field::text(copy::ROW_ACCOUNT, "buildc"),
             Field::secret(copy::ROW_PASSWORD, "hunter2"),
             Field::secret(copy::ROW_CONFIRM, "hunter2"),
             Field::pick(
@@ -260,7 +248,7 @@ fn the_action_says_what_the_form_is_short_of() {
     let form = |password: &str, confirm: &str, kind: &str, passphrase: &str| {
         vec![
             Field::text(copy::ROW_HOSTNAME, "deb2"),
-            Field::text(copy::ROW_ACCOUNT, "tect"),
+            Field::text(copy::ROW_ACCOUNT, "buildc"),
             Field::secret(copy::ROW_PASSWORD, password),
             Field::secret(copy::ROW_CONFIRM, confirm),
             Field::pick(
