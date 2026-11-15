@@ -44,6 +44,8 @@ cargo fmt --check || {
 echo "lint: the source is clean"
 
 cargo deny --locked check bans licenses sources
+# The fuzz crate resolves its own lockfile.
+cargo deny --manifest-path fuzz/Cargo.toml --locked check bans licenses sources
 echo "lint: the dependency policy accepts the locked graph"
 
 # Only the scheduled fuzz job builds the fuzz targets, so this check keeps
