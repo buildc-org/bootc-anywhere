@@ -137,6 +137,14 @@ impl CustomLayout {
         !(self.deletes.is_empty() && self.creates.is_empty() && self.renames.is_empty())
     }
 
+    pub(crate) fn confirm(&mut self, shown: &DiskTable, now: DiskState) -> Result<(), String> {
+        if now.table != *shown {
+            return Err(copy::table_changed(&self.disk));
+        }
+        self.confirmed = Some(now);
+        Ok(())
+    }
+
     pub(crate) fn opens_the_root(&self) -> bool {
         self.opens.iter().any(|open| open.target == "/")
     }

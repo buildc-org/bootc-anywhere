@@ -128,21 +128,18 @@ impl Answers {
                             layout.esp = esp;
                         }
                     }
-                    if let Some(layout) = answers.layout.as_mut().filter(|layout| {
-                        !layout.deletes.is_empty()
-                            || !layout.creates.is_empty()
-                            || !layout.renames.is_empty()
-                    }) {
+                    if let Some(layout) = answers
+                        .layout
+                        .as_mut()
+                        .filter(|layout| layout.changes_table())
+                    {
                         let shown = table_now.as_ref().ok_or_else(|| {
                             Error::Failed(
                                 "the partition table was not available to confirm".to_string(),
                             )
                         })?;
-                        let state = disk_state(&layout.disk)?;
-                        if state.table != *shown {
-                            return Err(Error::Failed(copy::table_changed(&layout.disk)));
-                        }
-                        layout.confirmed = Some(state);
+                        let now = disk_state(&layout.disk)?;
+                        layout.confirm(shown, now)?;
                     }
                     let warning = erase_warning(&payload.boot, &firmware(payload));
                     if common::ui::decide(
