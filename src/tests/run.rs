@@ -246,7 +246,8 @@ fn installs_from_the_payload_the_parent_staged() {
     let mut answers = answered(NONE, "");
     answers.disk = "/dev/buildc-test-absent".to_string();
     let refused = run(&payload, &mut answers, &Prompt::silent()).expect_err("an altered image");
-    std::fs::write(root.join("refused"), refused).expect("the child reports the refusal");
+    std::fs::write(root.join("refused"), refused.to_string())
+        .expect("the child reports the refusal");
 }
 
 #[test]

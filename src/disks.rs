@@ -1,4 +1,5 @@
 use super::*;
+use common::Error;
 
 // The kernel reports `/sys/block/<disk>/size` in 512-byte sectors, whatever the disk's logical sector size.
 const SECTOR: u64 = 512;
@@ -79,7 +80,7 @@ pub(crate) fn ask_disk(
     given: Option<String>,
     current: Option<&str>,
     prompt: &Prompt,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     if let Some(disk) = given.filter(|disk| !disk.is_empty()) {
         return Ok(disk);
     }
@@ -304,7 +305,7 @@ pub(crate) fn ask_encryption(
     prompt: &Prompt,
     tpm: bool,
     luks_initramfs: bool,
-) -> Result<Encryption, String> {
+) -> Result<Encryption, Error> {
     let kind = match given {
         Some(kind) => named(kind)?,
         None if !prompt.asks() => NONE.to_string(),
@@ -318,10 +319,10 @@ pub(crate) fn ask_encryption(
         }
     };
     if kind.starts_with("tpm2") && !tpm {
-        return Err(copy::NO_TPM.to_string());
+        return Err(Error::Failed(copy::NO_TPM.to_string()));
     }
     if kind != NONE && !luks_initramfs {
-        return Err(copy::NO_LUKS_INITRAMFS.to_string());
+        return Err(Error::Failed(copy::NO_LUKS_INITRAMFS.to_string()));
     }
     Ok(Encryption {
         passphrase: match Encryption::wants_passphrase(&kind) {

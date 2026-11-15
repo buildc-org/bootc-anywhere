@@ -1,13 +1,14 @@
 use super::*;
+use common::Error;
 use std::io::{BufRead as _, Write as _};
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(120);
 const STORAGE_CONF: &str = "/etc/containers/storage.conf";
 
-pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), String> {
+pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), Error> {
     validate_recipe(payload)?;
     if !portable_name(&answers.user) {
-        return Err(copy::account_name(&answers.user));
+        return Err(Error::Failed(copy::account_name(&answers.user)));
     }
     let password_hash = hashed(&answers.password)?;
     require_built_image(payload, prompt)?;
@@ -19,7 +20,10 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     let changes_table = prepared.layout.changes_table();
     installed(payload, answers, prompt, &password_hash, &mut prepared).map_err(|why| {
         match changes_table {
-            true => format!("{why}\n\n{}", copy::table_already_changed(&answers.disk)),
+            true => Error::Failed(format!(
+                "{why}\n\n{}",
+                copy::table_already_changed(&answers.disk)
+            )),
             false => why,
         }
     })
@@ -96,7 +100,7 @@ fn installed(
     prompt: &Prompt,
     password_hash: &str,
     prepared: &mut Prepared,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let karg = root_luks_arg(&prepared.layout, &payload.boot)?;
     let mut command = bootc_command(&payload.install, karg.as_deref());
     let (mut log, at) = open_log(payload);
@@ -169,10 +173,10 @@ fn installed(
     }
     let status = finished?;
     if !status.success() {
-        return Err(format!(
+        return Err(Error::Failed(format!(
             "bootc did not finish: {status}, and {}",
             copy::logging(at.as_deref())
-        ));
+        )));
     }
     let notes = arrange(payload, answers, &prepared.layout, password_hash)?;
     configure_boot_chain(&payload.image, &answers.disk, &payload.boot)?;
@@ -313,7 +317,7 @@ pub(crate) fn finish(
     volumes: &[String],
     offered: Offered,
     prompt: &Prompt,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if !prompt.draws() {
         if let Some(key) = recovery {
             println!("\n{}", copy::recovery(key));
@@ -361,10 +365,10 @@ pub(crate) fn done_actions(offered: &Offered) -> Vec<Choice> {
 
 pub(crate) fn choosing(
     offered: &mut Offered,
-    mut draw: impl FnMut(&Offered) -> Result<Option<usize>, String>,
+    mut draw: impl FnMut(&Offered) -> Result<Option<usize>, Error>,
     mut finalize: impl FnMut(&Ready) -> Result<(), String>,
     mut restart: impl FnMut() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     loop {
         let Some(at) = draw(offered)? else {
             return Ok(());
@@ -376,7 +380,7 @@ pub(crate) fn choosing(
                 continue;
             }
         }
-        return restart();
+        return Ok(restart()?);
     }
 }
 

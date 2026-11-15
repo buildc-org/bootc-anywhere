@@ -1,4 +1,5 @@
 use super::*;
+use common::Error;
 
 pub struct Encryption {
     pub kind: String,
@@ -256,8 +257,8 @@ pub(crate) enum Leave {
     Shell,
 }
 
-pub(crate) fn leaving(err: &str) -> bool {
-    err == common::ui::INTERRUPTED || common::prompt::cancelled(err)
+pub(crate) fn leaving(err: &common::Error) -> bool {
+    matches!(err, common::Error::Cancelled | common::Error::Interrupted)
 }
 
 pub(crate) fn leave_options() -> [Choice; 3] {
@@ -268,7 +269,7 @@ pub(crate) fn leave_options() -> [Choice; 3] {
     ]
 }
 
-pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, String> {
+pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, Error> {
     if !prompt.draws() {
         return Ok(Leave::Shell);
     }

@@ -267,7 +267,7 @@ fn a_headless_run_refuses_a_disk_it_cannot_read() {
         ..Default::default()
     };
     match Answers::seeded(&a_payload(), given, &Prompt::silent()) {
-        Err(said) => assert!(said.contains("lsblk"), "{said}"),
+        Err(said) => assert!(said.to_string().contains("lsblk"), "{said}"),
         Ok(_) => panic!("a disk lsblk cannot read is refused"),
     }
 }

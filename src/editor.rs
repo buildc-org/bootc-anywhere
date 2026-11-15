@@ -1,4 +1,5 @@
 use super::*;
+use common::Error;
 
 #[derive(Clone)]
 pub(crate) enum RowKind {
@@ -748,7 +749,7 @@ pub(crate) fn open_key(
     partition: &str,
     held: Option<&CustomLayout>,
     found: &Discovered,
-) -> Result<Key, String> {
+) -> Result<Key, Error> {
     let encrypted_root =
         held.is_some_and(|layout| layout.opens.iter().any(|open| open.target == "/"));
     match found
@@ -761,7 +762,7 @@ pub(crate) fn open_key(
     }
 }
 
-fn ask_key(plain_root: bool) -> Result<Key, String> {
+fn ask_key(plain_root: bool) -> Result<Key, Error> {
     let mut fields = vec![
         common::ui::Field::pick(copy::KEY_TYPE, key_methods(plain_root), Some(0)),
         common::ui::Field::secret(copy::KEY_PASSPHRASE, ""),
@@ -793,11 +794,11 @@ fn ask_key(plain_root: bool) -> Result<Key, String> {
         | common::ui::Filled::Opened(_)
         | common::ui::Filled::Changed(_)
         | common::ui::Filled::Table { .. }
-        | common::ui::Filled::Left => Err(common::ui::INTERRUPTED.to_string()),
+        | common::ui::Filled::Left => Err(common::Error::Interrupted),
     }
 }
 
-pub(crate) fn confirm_disk(disk: &DiskScan) -> Result<bool, String> {
+pub(crate) fn confirm_disk(disk: &DiskScan) -> Result<bool, Error> {
     let (size, model) = match disk.detail.split_once("  ") {
         Some((size, rest)) => (
             size.to_string(),
@@ -870,7 +871,7 @@ pub(crate) fn edit_luks(
     tpm: bool,
     luks_initramfs: bool,
     with_none: bool,
-) -> Result<Option<(String, String, String)>, String> {
+) -> Result<Option<(String, String, String)>, Error> {
     let options = kinds(tpm, luks_initramfs, with_none);
     let at = kind_at(&options, kind);
     let mut fields = vec![
@@ -983,7 +984,7 @@ pub(crate) fn slot_names(disk: &DiskScan, held: Option<&CustomLayout>) -> Vec<(u
 pub(crate) fn ask_create(
     rooms: Rooms,
     holes: Vec<common::ui::Hole>,
-) -> Result<Option<(u64, u64)>, String> {
+) -> Result<Option<(u64, u64)>, Error> {
     let header = [common::ui::HeaderLine::Placement {
         holes,
         offset: 0,
@@ -1065,7 +1066,7 @@ pub(crate) fn create_short_of(offset: &str, size: &str, room: u64) -> Option<Str
     }
 }
 
-pub(crate) fn ask_rename(partition: &str, held: &str) -> Result<Option<String>, String> {
+pub(crate) fn ask_rename(partition: &str, held: &str) -> Result<Option<String>, Error> {
     let mut fields = vec![common::ui::Field::text(copy::NEW_NAME, held)];
     let actions = [copy::RENAME_PART, copy::GO_BACK];
     let header: Vec<common::ui::HeaderLine> = match partition.is_empty() {
