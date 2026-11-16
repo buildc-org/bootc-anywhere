@@ -1,4 +1,5 @@
 use super::*;
+use common::Error;
 
 pub struct Encryption {
     pub kind: String,
@@ -136,6 +137,14 @@ impl CustomLayout {
         !(self.deletes.is_empty() && self.creates.is_empty() && self.renames.is_empty())
     }
 
+    pub(crate) fn confirm(&mut self, shown: &DiskTable, now: DiskState) -> Result<(), String> {
+        if now.table != *shown {
+            return Err(copy::table_changed(&self.disk));
+        }
+        self.confirmed = Some(now);
+        Ok(())
+    }
+
     pub(crate) fn opens_the_root(&self) -> bool {
         self.opens.iter().any(|open| open.target == "/")
     }
@@ -256,8 +265,8 @@ pub(crate) enum Leave {
     Shell,
 }
 
-pub(crate) fn leaving(err: &str) -> bool {
-    err == common::ui::INTERRUPTED || common::prompt::cancelled(err)
+pub(crate) fn leaving(err: &common::Error) -> bool {
+    matches!(err, common::Error::Cancelled | common::Error::Interrupted)
 }
 
 pub(crate) fn leave_options() -> [Choice; 3] {
@@ -268,7 +277,7 @@ pub(crate) fn leave_options() -> [Choice; 3] {
     ]
 }
 
-pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, String> {
+pub(crate) fn leave(prompt: &Prompt) -> Result<Leave, Error> {
     if !prompt.draws() {
         return Ok(Leave::Shell);
     }

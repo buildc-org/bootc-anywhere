@@ -1,4 +1,5 @@
 use super::*;
+use common::Error;
 
 pub(crate) fn install_actions() -> [&'static str; 4] {
     [
@@ -19,7 +20,7 @@ impl Answers {
         payload: &Payload,
         given: Given,
         prompt: &Prompt,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, Error> {
         let named = given.encryption.is_some();
         let seeded = Self::seeded(payload, given, prompt)?;
         if !prompt.draws() {
@@ -31,7 +32,7 @@ impl Answers {
             disk = scan.only_empty_disk().unwrap_or_default();
         }
         if let Some(why) = scan.refusal(&disk) {
-            return Err(why);
+            return Err(Error::Failed(why));
         }
         let chosen_kind = seeded.encryption.kind.clone();
         let mut kind = match (
@@ -127,19 +128,18 @@ impl Answers {
                             layout.esp = esp;
                         }
                     }
-                    if let Some(layout) = answers.layout.as_mut().filter(|layout| {
-                        !layout.deletes.is_empty()
-                            || !layout.creates.is_empty()
-                            || !layout.renames.is_empty()
-                    }) {
-                        let shown = table_now
-                            .as_ref()
-                            .ok_or("the partition table was not available to confirm")?;
-                        let state = disk_state(&layout.disk)?;
-                        if state.table != *shown {
-                            return Err(copy::table_changed(&layout.disk));
-                        }
-                        layout.confirmed = Some(state);
+                    if let Some(layout) = answers
+                        .layout
+                        .as_mut()
+                        .filter(|layout| layout.changes_table())
+                    {
+                        let shown = table_now.as_ref().ok_or_else(|| {
+                            Error::Failed(
+                                "the partition table was not available to confirm".to_string(),
+                            )
+                        })?;
+                        let now = disk_state(&layout.disk)?;
+                        layout.confirm(shown, now)?;
                     }
                     let warning = erase_warning(&payload.boot, &firmware(payload));
                     if common::ui::decide(
@@ -547,7 +547,7 @@ impl Answers {
         }
     }
 
-    pub(crate) fn seeded(payload: &Payload, given: Given, prompt: &Prompt) -> Result<Self, String> {
+    pub(crate) fn seeded(payload: &Payload, given: Given, prompt: &Prompt) -> Result<Self, Error> {
         if !prompt.draws() {
             let disk = ask_disk(given.disk, None, prompt)?;
             partitions(&disk)?;

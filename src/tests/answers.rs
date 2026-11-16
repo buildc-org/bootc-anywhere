@@ -267,7 +267,54 @@ fn a_headless_run_refuses_a_disk_it_cannot_read() {
         ..Default::default()
     };
     match Answers::seeded(&a_payload(), given, &Prompt::silent()) {
-        Err(said) => assert!(said.contains("lsblk"), "{said}"),
+        Err(said) => assert!(said.to_string().contains("lsblk"), "{said}"),
         Ok(_) => panic!("a disk lsblk cannot read is refused"),
     }
+}
+
+#[test]
+fn a_cancel_or_an_interrupt_leaves_the_question_and_a_failure_does_not() {
+    assert!(leaving(&common::Error::Cancelled));
+    assert!(leaving(&common::Error::Interrupted));
+    assert!(!leaving(&common::Error::Failed("no terminal".to_string())));
+}
+
+#[test]
+fn a_table_that_changed_since_the_user_confirmed_it_is_refused() {
+    let shown = DiskTable {
+        label: "gpt".to_string(),
+        ..Default::default()
+    };
+    let now = DiskState {
+        rdev: 1,
+        dev: 2,
+        ino: 3,
+        table: DiskTable {
+            label: "dos".to_string(),
+            ..Default::default()
+        },
+    };
+    let mut layout = CustomLayout::empty("/dev/vda");
+    assert_eq!(
+        layout.confirm(&shown, now),
+        Err(copy::table_changed("/dev/vda"))
+    );
+    assert_eq!(layout.confirmed, None);
+}
+
+#[test]
+fn an_unchanged_table_records_the_disk_state_that_the_write_checks() {
+    let shown = DiskTable {
+        label: "gpt".to_string(),
+        ..Default::default()
+    };
+    let now = DiskState {
+        rdev: 1,
+        dev: 2,
+        ino: 3,
+        table: shown.clone(),
+    };
+    let mut layout = CustomLayout::empty("/dev/vda");
+    assert_eq!(layout.confirm(&shown, now.clone()), Ok(()));
+    assert_eq!(layout.confirmed, Some(now));
 }

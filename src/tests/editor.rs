@@ -716,6 +716,7 @@ fn root_encryption_is_refused_without_an_initramfs_witness() {
             false,
         )
         .err()
+        .map(|err| err.to_string())
         .as_deref(),
         Some(copy::NO_LUKS_INITRAMFS)
     );

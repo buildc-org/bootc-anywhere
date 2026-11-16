@@ -100,7 +100,10 @@ fn an_encryption_no_backend_takes_is_refused_by_name() {
     )
     .err()
     .expect("a refusal");
-    assert!(refused.contains("tpm2-luks-passphrase"), "{refused}");
+    assert!(
+        refused.to_string().contains("tpm2-luks-passphrase"),
+        "{refused}"
+    );
     let kept = ask_encryption(
         Some("tpm2-luks".to_string()),
         None,
@@ -126,6 +129,7 @@ fn a_headless_tpm2_kind_is_refused_without_a_tpm() {
             true
         )
         .err()
+        .map(|err| err.to_string())
         .as_deref(),
         Some(copy::NO_TPM)
     );

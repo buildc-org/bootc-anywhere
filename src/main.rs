@@ -12,7 +12,8 @@ fn main() -> ExitCode {
 
     match run() {
         Ok(code) => code,
-        Err(message) => {
+        Err(error) => {
+            let message = error.to_string();
             let stop = match message.ends_with(['.', '!', '?']) || message.contains('\n') {
                 true => "",
                 false => ".",
@@ -39,7 +40,7 @@ fn refused(error: clap::Error) -> ExitCode {
     }
 }
 
-fn run() -> Result<ExitCode, String> {
+fn run() -> Result<ExitCode, common::Error> {
     let words: Vec<String> = std::env::args().skip(1).collect();
     if words == ["--version"] {
         println!("{PROGRAM} v{}", env!("CARGO_PKG_VERSION"));
