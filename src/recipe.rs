@@ -12,7 +12,6 @@ pub(crate) struct InstallRecipe {
     pub(crate) hostname: String,
     pub(crate) groups: Vec<String>,
     pub(crate) stores: Vec<String>,
-    pub(crate) boot: String,
     pub(crate) luks_initramfs: bool,
 }
 
@@ -34,11 +33,10 @@ impl InstallRecipe {
             "hostname",
             "user",
             "additionalImageStores",
-            "boot",
             "luksInitramfs",
         ];
-        // A field this installer does not understand could change what the recipe describes, so the whole document is refused.
         for (at, (name, _)) in fields.iter().enumerate() {
+            // An unknown field could change what the recipe describes.
             if !KNOWN.contains(&name.as_str()) {
                 return Err(format!(
                     "{}: field `{name}` is not implemented",
@@ -102,13 +100,6 @@ impl InstallRecipe {
                 path.display()
             ));
         }
-        let boot = optional_text(&doc, path, "boot")?.unwrap_or_default();
-        if !boot.is_empty() && crate::copy::boot_chain(&boot).is_none() {
-            return Err(format!(
-                "{}: `boot` {boot:?} is not a boot chain this installer configures",
-                path.display()
-            ));
-        }
         Ok(Self {
             image,
             target_imgref,
@@ -119,7 +110,6 @@ impl InstallRecipe {
             hostname: required_text(&doc, path, "hostname")?,
             groups,
             stores,
-            boot,
             luks_initramfs: optional_bool(&doc, path, "luksInitramfs")?.unwrap_or(false),
         })
     }

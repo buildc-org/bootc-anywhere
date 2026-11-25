@@ -92,7 +92,6 @@ refuses the whole call when it receives one.
 | `targetImgref` | `bootc_command`, as `--target-imgref` | the installed machine updates from `image` |
 | `composeFsBackend` | the root filesystem rules and `bootc_command` | treated as false, and a root may be any filesystem |
 | `genericImage` | `bootc_command`, as `--generic-image` | treated as false |
-| `boot` | `require_signed_boot_chain`, `configure_boot_chain` | no chain is declared, and the existing boot path installs |
 | `luksInitramfs` | `kinds` in `src/disks.rs` | no encrypted kind is drawn on the form |
 | `user.groups` | `account::configure` | the account is made in no extra group |
 
@@ -101,30 +100,25 @@ draw the option. An image that is sealed with composefs and omits
 `composeFsBackend` is installed unsealed, and it loses the rule that holds its
 root to ext4 or btrfs. No screen names the field.
 
-### The two fields that describe the image
+### The field that describes the image
 
-`boot` and `luksInitramfs` are claims about the image that the installer never
-passes to bootc.
-
-`boot` names the UKI trust chain the image was built for, `uki-db` or
-`uki-shim`. A recipe declaring one is refused before the disk is cut unless the
-image carries `/usr/share/secureboot/signed`.
-
-`luksInitramfs` claims the image's initramfs carries a LUKS userspace driver. It
+`luksInitramfs` is a claim about the image that the installer never passes to
+bootc. It claims the image's initramfs carries a LUKS userspace driver. It
 gates every encrypted kind on the form. A recipe without it installs plain or
 does not install, whatever the machine's TPM says, so an image whose initramfs
 opens LUKS must say so here.
 
 ## The image contract
 
-Five paths inside the image. The installer probes for each by running the image
+Six paths inside the image. The installer probes for each by running the image
 under `podman run --rm --pull=never --net=none`, so an image that carries none
 of them still installs unencrypted on the existing boot path.
 
 | Path | Read by | When | Absent |
 | --- | --- | --- | --- |
-| `/usr/share/secureboot/signed` | `require_signed_boot_chain` | before the cut, where `boot` is declared | the install is refused, and the disk is untouched |
-| `/usr/share/secureboot/sb_cert.pem` | `owner_certificate` in `src/panel.rs` | while the firmware is read, where `boot` is declared and a foreign key holds the platform key | the firmware reads as holding a foreign key. On the `uki-db` chain the last screen then asks for the vendor's setup-mode steps |
+| `/usr/share/buildc/boot-chain` | `classify` in `src/payload.rs` | before the first screen | no chain is declared, and the existing boot path installs. A file that names no chain this installer configures refuses the install, and so does a failed read |
+| `/usr/share/secureboot/signed` | `require_signed_boot_chain` | before the cut, where the image declares a chain | the install is refused, and the disk is untouched |
+| `/usr/share/secureboot/sb_cert.pem` | `owner_certificate` in `src/panel.rs` | while the firmware is read, where the image declares a chain and a foreign key holds the platform key | the firmware reads as holding a foreign key. On the `uki-db` chain the last screen then asks for the vendor's setup-mode steps |
 | `/usr/share/secureboot/pcr-policy.pem` | `pcr_policy_in` | while `/etc` is written, where the install creates or opens a container with TPM2 | the first-boot token binds to PCR 7 alone |
 | `/usr/libexec/secureboot-enrolment` | `run_enrolment` | after bootc, on the `uki-shim` chain | the install fails with the disk already written |
 | `/usr/libexec/grub-menu-from-bls` | `run_renderer` | after bootc | the step is skipped, and the install succeeds |

@@ -110,7 +110,6 @@ fn an_install_recipe() -> InstallRecipe {
         hostname: "deb2".to_string(),
         groups: vec!["sudo".to_string()],
         stores: vec!["/var/lib/buildc/store".to_string()],
-        boot: String::new(),
         luks_initramfs: true,
     }
 }

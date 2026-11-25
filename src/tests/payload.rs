@@ -1,15 +1,22 @@
 use super::*;
 
+fn no_chain(_: &str) -> Result<String, String> {
+    Ok(String::new())
+}
+
 #[test]
 fn a_payload_wins_over_the_repository_that_would_have_to_be_built() {
     let root = scratch("cases");
-    assert!(matches!(classify(&root), Ok(Found::Nothing(_))));
+    assert!(matches!(
+        classify_with(&root, no_chain),
+        Ok(Found::Nothing(_))
+    ));
 
     std::fs::write(root.join(crate::REPO_FILE), "repo {\n}\n").expect("a repo.kdl");
-    assert!(matches!(classify(&root), Ok(Found::Repo(_))));
+    assert!(matches!(classify_with(&root, no_chain), Ok(Found::Repo(_))));
 
     std::fs::write(root.join(RECIPE), EMITTED).expect("a recipe");
-    let Ok(Found::Image(payload)) = classify(&root) else {
+    let Ok(Found::Image(payload)) = classify_with(&root, no_chain) else {
         panic!("a payload beside a repository is still a payload");
     };
     assert_eq!(payload.image, "ghcr.io/buildc-org/deb2:latest");
@@ -20,21 +27,36 @@ fn a_payload_wins_over_the_repository_that_would_have_to_be_built() {
 
     let uki = EMITTED.replace(
         "\"bootloader\": \"grub2\",",
-        "\"bootloader\": \"systemd\",\n  \"boot\": \"uki-db\",\n  \"luksInitramfs\": true,",
+        "\"bootloader\": \"systemd\",\n  \"luksInitramfs\": true,",
     );
     std::fs::write(root.join(RECIPE), uki).expect("a UKI recipe");
-    let Ok(Found::Image(payload)) = classify(&root) else {
+    let Ok(Found::Image(payload)) = classify_with(&root, |_| Ok("uki-db".to_string())) else {
         panic!("a UKI recipe is a payload");
     };
     assert_eq!(payload.boot, "uki-db");
     assert!(payload.luks_initramfs);
 
     std::fs::write(root.join(RECIPE), "{").expect("a broken recipe");
-    assert!(classify(&root).is_err());
+    assert!(classify_with(&root, no_chain).is_err());
     std::fs::write(root.join(RECIPE), "{}").expect("an empty recipe");
-    assert!(classify(&root)
+    assert!(classify_with(&root, no_chain)
         .unwrap_err()
         .contains(&format!("{RECIPE}: no `image`")));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_image_naming_an_unknown_boot_chain_is_refused() {
+    let root = scratch("unknown-chain");
+    let uki = EMITTED.replace(
+        "\"bootloader\": \"grub2\",",
+        "\"bootloader\": \"systemd\",\n  \"luksInitramfs\": true,",
+    );
+    std::fs::write(root.join(RECIPE), uki).expect("a UKI recipe");
+    let refused = classify_with(&root, |_| Ok("uki-grub".to_string())).unwrap_err();
+    assert!(refused.contains("not a boot chain"), "{refused}");
+    let refused = classify_with(&root, |_| Err("no such image".to_string())).unwrap_err();
+    assert_eq!(refused, "no such image");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -47,7 +69,7 @@ fn a_hand_written_recipe_names_the_media_store() {
              \"bootloader\": \"grub2\",\n  \
              \"additionalImageStores\": [\"/var/lib/buildc/store\"]\n}";
     std::fs::write(&recipe, hand_written).expect("a hand-written recipe");
-    let Ok(Found::Image(payload)) = classify(&root) else {
+    let Ok(Found::Image(payload)) = classify_with(&root, no_chain) else {
         panic!("a hand-written recipe with a store is a payload");
     };
     assert_eq!(payload.image, "quay.io/fedora/fedora-bootc:42");
@@ -68,7 +90,7 @@ fn a_hand_written_recipe_names_the_media_store() {
          \"bootloader\":\"grub2\"}",
     )
     .expect("a recipe without a store");
-    let refused = classify(&root).unwrap_err();
+    let refused = classify_with(&root, no_chain).unwrap_err();
     assert!(refused.contains("additionalImageStores"), "{refused}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -208,7 +230,7 @@ fn an_altered_image_byte_fails_the_read_back() {
 #[test]
 fn a_read_back_out_of_space_names_the_space_it_needs() {
     use std::os::unix::process::ExitStatusExt as _;
-    // podman exits 125 when the image save fails.
+    // Podman exits 125 when the image save fails.
     let failed = std::process::ExitStatus::from_raw(125 << 8);
     let full = read_whole(
         STORED,
