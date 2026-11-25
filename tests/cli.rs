@@ -20,6 +20,14 @@ fn empty(name: &str) -> PathBuf {
     dir
 }
 
+fn fake(dir: &Path, name: &str, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 fn terminal_flow(dir: &Path, command: &str, steps: &[(&[u8], &[u8])]) -> Vec<u8> {
     use std::io::{Read, Write};
     use std::process::Stdio;
@@ -48,7 +56,7 @@ fn terminal_flow(dir: &Path, command: &str, steps: &[(&[u8], &[u8])]) -> Vec<u8>
             while output.read_exact(&mut byte).is_ok() {
                 let mut held = raw.lock().unwrap();
                 held.push(byte[0]);
-                // The terminal UI waits for a cursor position report, so the reader answers every query.
+                // The terminal UI waits for a cursor position report and the reader answers every query.
                 if held.ends_with(b"\x1b[6n") {
                     let mut input = input.lock().unwrap();
                     let _ = input.write_all(b"\x1b[1;1R");
@@ -202,10 +210,20 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
     )
     .unwrap();
     let lock = dir.join("installer.lock");
+    // The installer reads the image's boot chain through podman and the test host holds no such image.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake(&bin, "podman", "#!/bin/sh\nexit 0\n");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let second = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_bootc-anywhere"))
             .args(["--from", "."])
             .current_dir(&dir)
+            .env("PATH", &path)
             .env("BUILDC_INSTALLER_LOCK", &lock)
             .env("BUILDC_TPM", "/nonexistent")
             .output()
@@ -223,6 +241,7 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
             "/dev/null",
         ])
         .current_dir(&dir)
+        .env("PATH", &path)
         .env("COLUMNS", "80")
         .env("BUILDC_TPM", "/nonexistent")
         .stdin(std::process::Stdio::piped())
@@ -259,8 +278,6 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
 
 #[test]
 fn installer_terminal_smoke_waits_for_each_screen() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = empty("flow-install-drawn");
     std::fs::write(
         dir.join(installer::RECIPE),
@@ -290,9 +307,9 @@ fn installer_terminal_smoke_waits_for_each_screen() {
         std::fs::write(disk.join("removable"), removable).unwrap();
         std::fs::write(disk.join("device/model"), model).unwrap();
     }
-    let lsblk = dir.join("lsblk");
-    std::fs::write(
-        &lsblk,
+    fake(
+        &dir,
+        "lsblk",
         r#"#!/bin/sh
 case "$*" in
 *--json*"/dev/sdb"*) printf '%s\n' '{"blockdevices":[{"name":"/dev/sdb","type":"disk","children":[]}]}' ;;
@@ -300,9 +317,7 @@ case "$*" in
 *SIZE*) printf '%s\n' '64G' ;;
 esac
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&lsblk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let dev = dir.join("dev");
     std::fs::create_dir_all(&dev).unwrap();
     let image = dev.join("vda");
@@ -349,9 +364,9 @@ esac
             .unwrap();
     }
     assert!(child.wait().unwrap().success());
-    let fake_mount = dir.join("mount");
-    std::fs::write(
-        &fake_mount,
+    fake(
+        &dir,
+        "mount",
         r#"#!/bin/sh
 # `mount_ro` passes the device third and the mount point last.
 case "$3" in
@@ -363,36 +378,29 @@ case "$3" in
 esac
 exit 0
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake_mount, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let fake_umount = dir.join("umount");
-    std::fs::write(&fake_umount, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&fake_umount, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let cryptsetup = dir.join("cryptsetup");
-    std::fs::write(
-        &cryptsetup,
+    );
+    fake(&dir, "umount", "#!/bin/sh\nexit 0\n");
+    fake(
+        &dir,
+        "cryptsetup",
         r#"#!/bin/sh
 case "$1" in
 luksDump) printf '%s\n' '{"keyslots":{"0":{}},"tokens":{}}' ;;
 *) exit 1 ;;
 esac
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&cryptsetup, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let podman = dir.join("podman");
-    std::fs::write(
-        &podman,
+    );
+    fake(
+        &dir,
+        "podman",
         r#"#!/bin/sh
 case "$*" in
 *"/usr/lib/efi"*) printf '%s\n' /usr/lib/efi/grub2/1/EFI/fedora /usr/lib/efi/shim/1/EFI/BOOT ;;
+*"/usr/share/buildc/boot-chain"*) ;;
 *) exit 1 ;;
 esac
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let efivars = dir.join("efivars");
     std::fs::create_dir_all(&efivars).unwrap();
     for (name, value) in [("SecureBoot", 0u8), ("SetupMode", 1u8)] {

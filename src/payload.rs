@@ -32,20 +32,7 @@ pub(crate) const ESP_LIST: &str = "for d in \"${1:-/usr/lib/efi}\"/*/*/EFI/*/ \"
 impl Payload {
     pub(crate) fn esp_entries(&self) -> &[String] {
         self.esp_entries.get_or_init(|| {
-            let out = Command::new("podman")
-                .args([
-                    "run",
-                    "--rm",
-                    "--pull=never",
-                    "--net=none",
-                    "--security-opt",
-                    "label=disable",
-                    "--entrypoint",
-                    "",
-                ])
-                .arg(&self.image)
-                .args(["/bin/sh", "-c", ESP_LIST])
-                .output();
+            let out = run_in(&self.image, ESP_LIST).output();
             match out {
                 Ok(out) if out.status.success() => {
                     esp::entry_names(&String::from_utf8_lossy(&out.stdout))
@@ -117,16 +104,30 @@ impl Found {
 }
 
 pub fn classify(root: &Path) -> Result<Found, String> {
+    classify_with(root, image_chain)
+}
+
+pub(crate) fn classify_with(
+    root: &Path,
+    chain: fn(&str) -> Result<String, String>,
+) -> Result<Found, String> {
     let recipe = root.join(RECIPE);
     if recipe.is_file() {
         let install = InstallRecipe::read(&recipe)?;
+        let boot = chain(&install.image)?;
+        if !boot.is_empty() && crate::copy::boot_chain(&boot).is_none() {
+            return Err(format!(
+                "{}: {BOOT_CHAIN} holds {boot:?}, which is not a boot chain this installer configures",
+                install.image
+            ));
+        }
         return Ok(Found::Image(Payload {
             image: install.image.clone(),
             image_id: recorded_id(root)?,
             hostname: install.hostname.clone(),
             filesystem: install.filesystem.clone(),
             bootloader: install.bootloader.clone(),
-            boot: install.boot.clone(),
+            boot,
             composefs: install.composefs,
             reserve: std::sync::OnceLock::new(),
             luks_initramfs: install.luks_initramfs,
@@ -174,6 +175,45 @@ pub(crate) fn recorded_id(root: &Path) -> Result<Option<ImageId>, String> {
             path.display()
         )
     })
+}
+
+/// The boot/uki component writes the image's boot chain to this file at image build time.
+const BOOT_CHAIN: &str = "/usr/share/buildc/boot-chain";
+
+// An image without a UKI carries no chain file.
+// A failed read refuses the install because a chain read as absent would skip the signed-chain check.
+fn image_chain(image: &str) -> Result<String, String> {
+    let out = run_in(
+        image,
+        &format!("if [ -e {BOOT_CHAIN} ]; then cat {BOOT_CHAIN}; fi"),
+    )
+    .output()
+    .map_err(|err| format!("podman cannot read {BOOT_CHAIN} from {image}: {err}"))?;
+    match out.status.success() {
+        true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        false => Err(format!(
+            "{image}: {BOOT_CHAIN} cannot be read: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+fn run_in(image: &str, script: &str) -> Command {
+    let mut command = Command::new("podman");
+    command
+        .args([
+            "run",
+            "--rm",
+            "--pull=never",
+            "--net=none",
+            "--security-opt",
+            "label=disable",
+            "--entrypoint",
+            "",
+        ])
+        .arg(image)
+        .args(["/bin/sh", "-c", script]);
+    command
 }
 
 pub(crate) fn inspect(image: &str, format: &str) -> Command {
